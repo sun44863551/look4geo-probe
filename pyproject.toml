@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "look4geo-probe"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "mcp>=1.13,<2",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0,<7",
+  "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<9", "pytest-asyncio>=1.1,<2"]
+
+[project.scripts]
+probe = "look4geo_probe.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/look4geo_probe"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+

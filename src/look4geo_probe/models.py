@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+SCHEMA_VERSION = 1
+
+
+class RouteMode(StrEnum):
+    AUTO = "auto"
+    COMPARE = "compare"
+    ALL = "all"
+    MANUAL = "manual"
+
+
+class JobStatus(StrEnum):
+    QUEUED = "queued"
+    ROUTING = "routing"
+    RUNNING = "running"
+    WAITING_FOR_LOGIN = "waiting_for_login"
+    PARTIAL = "partial"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProbeRequest(StrictModel):
+    prompt: str = Field(min_length=1)
+    mode: RouteMode = RouteMode.AUTO
+    platforms: list[str] = Field(default_factory=list)
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("prompt")
+    @classmethod
+    def normalize_prompt(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("prompt must not be blank")
+        return value
+
+    @field_validator("platforms")
+    @classmethod
+    def deduplicate_platforms(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "ProbeRequest":
+        if self.mode == RouteMode.MANUAL and not self.platforms:
+            raise ValueError("manual mode requires at least one platform")
+        return self
+
+
+class PlatformHealth(StrictModel):
+    available: bool = True
+    logged_in: bool = True
+    rate_limited: bool = False
+    reason: str | None = None
+
+
+class RoutingDecision(StrictModel):
+    selected_platforms: list[str] = Field(default_factory=list)
+    reasons: dict[str, list[str]] = Field(default_factory=dict)
+    excluded: dict[str, str] = Field(default_factory=dict)
+    coverage_gaps: list[str] = Field(default_factory=list)
+    domestic_count: int = 0
+    international_count: int = 0
+
+
+class Citation(StrictModel):
+    url: str
+    label: str | None = None
+
+
+class PlatformAttempt(StrictModel):
+    platform: str
+    adapter: str
+    status: JobStatus
+    raw_answer: str = ""
+    normalized_answer: str = ""
+    citations: list[Citation] = Field(default_factory=list)
+    diagnostic: str | None = None
+    artifact_paths: list[str] = Field(default_factory=list)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at: datetime | None = None
+
+
+class ProbeResult(StrictModel):
+    schema_version: int = SCHEMA_VERSION
+    job_id: str
+    prompt: str
+    status: JobStatus
+    routing: RoutingDecision | None = None
+    attempts: list[PlatformAttempt] = Field(default_factory=list)
+    diagnostic: str | None = None

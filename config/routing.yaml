@@ -1,0 +1,12 @@
+modes:
+  auto: {min: 1, max: 3}
+  compare: {min: 2, max: 5}
+signals:
+  doubao: [抖音, 字节, 消费, 热点]
+  deepseek: [推理, 代码, 技术]
+  yuanbao: [微信, 公众号, 腾讯]
+  qwen: [阿里, 淘宝, 电商]
+  chatgpt: [品牌推荐, global, international]
+  gemini: [google, 全球网页, 海外搜索]
+  perplexity: [引用, 来源, 可核验, citation]
+  grok: [x, twitter, 实时社交, 热议]

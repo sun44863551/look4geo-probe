@@ -1,0 +1,10 @@
+platforms:
+  doubao: {region: domestic, primary: ai_search_hub, fallback: browser_skill, citations: false}
+  deepseek: {region: domestic, primary: browser_skill, citations: false}
+  yuanbao: {region: domestic, primary: ai_search_hub, fallback: browser_skill, citations: true}
+  qwen: {region: domestic, primary: ai_search_hub, fallback: browser_skill, citations: true}
+  chatgpt: {region: international, primary: browser_skill, citations: true}
+  gemini: {region: international, primary: ai_search_hub, fallback: browser_skill, citations: true}
+  perplexity: {region: international, primary: browser_skill, citations: true}
+  grok: {region: international, primary: ai_search_hub, fallback: browser_skill, citations: true}
+
