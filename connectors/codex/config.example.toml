@@ -1,0 +1,5 @@
+[mcp_servers.look4geo-probe]
+command = "/absolute/path/to/look4geo-probe/.venv/bin/python"
+args = ["-m", "look4geo_probe.mcp_server"]
+env = { LOOK4GEO_BROWSER_ID = "browser-instance-id" }
+

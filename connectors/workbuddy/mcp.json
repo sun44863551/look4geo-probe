@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "look4geo-probe": {
+      "type": "stdio",
+      "command": "/Users/sunkai/Documents/Codex/2026-09-24/referenced-chatgpt-conversation-this-is-an/.venv/bin/python",
+      "args": ["-m", "look4geo_probe.mcp_server"],
+      "env": {
+        "LOOK4GEO_BROWSER_ID": "5cbc9e53"
+      },
+      "timeout": 30000
+    }
+  }
+}
+
