@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+LOCAL_ENV="$PROJECT_DIR/config/local.env"
+
+if [ -f "$LOCAL_ENV" ]; then
+    set -a
+    . "$LOCAL_ENV"
+    set +a
+fi
+
+exec "$PROJECT_DIR/.venv/bin/probe" "$@"

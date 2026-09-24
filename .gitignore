@@ -10,4 +10,4 @@ vendor/
 .env
 .env.*
 !.env.example
-
+config/local.env

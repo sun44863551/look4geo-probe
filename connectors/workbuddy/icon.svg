@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Look4GEO">
-  <rect width="128" height="128" rx="28" fill="#12263A"/>
-  <circle cx="64" cy="58" r="34" fill="none" stroke="#35D0BA" stroke-width="8"/>
-  <path d="M30 58h68M64 24c12 12 18 23 18 34S76 80 64 92M64 24C52 36 46 47 46 58s6 22 18 34" fill="none" stroke="#35D0BA" stroke-width="6" stroke-linecap="round"/>
-  <path d="M84 86l22 22" stroke="#F4B942" stroke-width="10" stroke-linecap="round"/>
-</svg>

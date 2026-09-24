@@ -9,12 +9,15 @@ author: Look4GEO
 
 # Look4GEO Probe
 
-Call the installed `look4geo-probe` MCP server.
+Use the private local CLI at:
 
-1. Use `probe_run` with `auto` unless the user requests named platforms or a comprehensive comparison.
-2. Tell the user which platforms were selected and why.
-3. The initial call returns a job ID. Poll `probe_status`; do not hold one MCP request open waiting for browser answers.
-4. Fetch `probe_result` after `succeeded`, `partial`, `failed`, or `waiting_for_login`.
-5. For `waiting_for_login`, call `probe_login` and let the user complete the visible browser step. Never ask for credentials or extract browser secrets.
+`/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local`
+
+1. Run `probe run "<question>" --mode auto --json` unless the user requests named platforms or a comprehensive comparison.
+2. For explicit selection, add one or more `--platform <name>` options and use `--mode selected`.
+3. Tell the user which platforms were selected and why.
+4. The local CLI waits for completion and returns the result. Use `probe platforms --json` to inspect availability.
+5. For a login requirement, run `probe login <platform> --json` and let the user complete the visible browser step. Never ask for credentials or extract browser secrets.
 6. Keep successful platform results when another platform fails and state the failure clearly.
 
+Do not upload, publish, or install this project through WorkBuddy's public Experts, Skills, or Connectors catalog. The code, browser credentials, job database, and results must remain on this Mac.

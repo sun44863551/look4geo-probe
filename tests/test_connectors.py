@@ -13,19 +13,20 @@ def read_frontmatter(path: Path) -> dict:
     return yaml.safe_load(raw)
 
 
-def test_workbuddy_connector_has_one_stdio_server_and_no_secret_literals():
-    connector = ROOT / "connectors/workbuddy"
-    meta = json.loads((connector / "connector-meta.json").read_text(encoding="utf-8"))
-    mcp = json.loads((connector / "mcp.json").read_text(encoding="utf-8"))
-    assert meta["source"] == "look4geo-probe"
-    assert meta["type"] == "mcp"
+def test_workbuddy_local_config_has_one_stdio_server_and_no_secret_literals():
+    integration = ROOT / "connectors/workbuddy"
+    mcp = json.loads((integration / "mcp.json").read_text(encoding="utf-8"))
     assert len(mcp["mcpServers"]) == 1
     server = mcp["mcpServers"]["look4geo-probe"]
     assert server["type"] == "stdio"
     assert server["args"] == ["-m", "look4geo_probe.mcp_server"]
-    combined = json.dumps({"meta": meta, "mcp": mcp})
+    combined = json.dumps(mcp)
     assert "sk-" not in combined
     assert "Bearer " not in combined
+
+    readme = (integration / "README.md").read_text(encoding="utf-8")
+    assert "machine-local" in readme
+    assert "must not be uploaded" in readme
 
 
 def test_both_skills_have_discriminating_frontmatter():
@@ -38,9 +39,3 @@ def test_both_skills_have_discriminating_frontmatter():
         assert frontmatter["name"] == "look4geo-probe"
         assert "GEO" in frontmatter["description"]
         assert "probe" in path.read_text(encoding="utf-8").casefold()
-
-
-def test_workbuddy_package_contains_required_icon():
-    icon = ROOT / "connectors/workbuddy/icon.svg"
-    assert icon.exists()
-    assert "<svg" in icon.read_text(encoding="utf-8")
