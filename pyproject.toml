@@ -8,6 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "mcp>=1.13,<2",
+  "playwright>=1.55,<2",
   "pydantic>=2.11,<3",
   "PyYAML>=6.0,<7",
   "typer>=0.16,<1",
@@ -25,4 +26,3 @@ packages = ["src/look4geo_probe"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-
