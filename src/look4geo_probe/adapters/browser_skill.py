@@ -11,6 +11,14 @@ from .types import AdapterHealth
 from ..models import Citation, FailureKind, JobStatus, PlatformAttempt, ProbeRequest
 
 PLATFORMS = {
+    "doubao": {
+        "url": "https://www.doubao.com/chat/?channel=sysceo&from_login=1",
+        "textbox": ("发送消息", "输入消息", "问问豆包"),
+        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
+        "login_markers": ("登录", "扫码登录"),
+        "conversation_marker": "/chat/",
+        "answer_selector": '[class*="assistant"], [class*="markdown"], [data-message-author-role="assistant"]',
+    },
     "chatgpt": {
         "url": "https://chatgpt.com/",
         "textbox": ("给 ChatGPT 发消息",),
@@ -27,6 +35,30 @@ PLATFORMS = {
         "conversation_marker": "/a/chat/s/",
         "answer_selector": ".ds-markdown, .markdown",
     },
+    "yuanbao": {
+        "url": "https://yuanbao.tencent.com/chat",
+        "textbox": ("输入消息", "有问题尽管问我", "给元宝发送消息"),
+        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
+        "login_markers": ("登录", "微信扫码登录", "上次登录"),
+        "conversation_marker": "/chat/",
+        "answer_selector": '[data-role="assistant"], [class*="assistant"], [class*="markdown"], [class*="answer"]',
+    },
+    "qwen": {
+        "url": "https://chat.qwen.ai/",
+        "textbox": ("输入消息", "How can I help you today?", "Ask anything"),
+        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
+        "login_markers": ("登录", "Sign in", "Continue with Google"),
+        "conversation_marker": "/c/",
+        "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="markdown"], article',
+    },
+    "gemini": {
+        "url": "https://gemini.google.com/app",
+        "textbox": ("输入提示", "Enter a prompt", "向 Gemini 提问"),
+        "composer_selector": 'rich-textarea textarea, textarea, div[role="textbox"], div[contenteditable="true"]',
+        "login_markers": ("登录", "Sign in", "Continue with Google"),
+        "conversation_marker": "/app/",
+        "answer_selector": 'message-content, [data-response-id], [class*="response"], [class*="markdown"]',
+    },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
         "textbox": ("输入 @ 以使用连接器", "问任何事情..."),
@@ -34,6 +66,14 @@ PLATFORMS = {
         "login_markers": ("登录", "继续使用"),
         "conversation_marker": "/search/",
         "answer_selector": '[class*="prose"]',
+    },
+    "grok": {
+        "url": "https://grok.com/",
+        "textbox": ("Ask anything", "向 Grok 提问", "输入消息"),
+        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
+        "login_markers": ("登录", "Sign in", "Continue with X", "Continue with Google"),
+        "conversation_marker": "/c/",
+        "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="response"], [class*="markdown"]',
     },
 }
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")

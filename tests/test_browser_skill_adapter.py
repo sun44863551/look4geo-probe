@@ -6,6 +6,7 @@ from look4geo_probe.adapters.browser_skill import (
     BskCliClient,
     BrowserProbeOutput,
     BrowserSkillAdapter,
+    PLATFORMS,
     normalize_for_browser,
     submission_confirmed,
     select_main_answer,
@@ -19,6 +20,19 @@ def test_normalize_for_browser_preserves_original_and_records_changes():
     assert normalized.original == "purity ≥ 99% — supplier’s certificate\u00a0required"
     assert normalized.sent == "purity >= 99% - supplier's certificate required"
     assert normalized.changed is True
+
+
+def test_browser_skill_defines_every_probe_platform():
+    assert set(PLATFORMS) == {
+        "doubao",
+        "deepseek",
+        "yuanbao",
+        "qwen",
+        "chatgpt",
+        "gemini",
+        "perplexity",
+        "grok",
+    }
 
 
 def test_perplexity_selects_longest_answer_not_follow_up():
