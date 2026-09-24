@@ -43,6 +43,15 @@ def test_submission_confirmation_requires_new_conversation_url(
     assert submission_confirmed(platform, before, after) is expected
 
 
+def test_chatgpt_submission_is_confirmed_when_answer_starts_before_url_changes():
+    assert submission_confirmed(
+        "chatgpt",
+        "https://chatgpt.com/",
+        "https://chatgpt.com/",
+        answer_started=True,
+    ) is True
+
+
 def test_textbox_lookup_accepts_current_perplexity_label():
     page = '@e18 textbox "问任何事情..." [empty]'
     assert BskCliClient._find_textbox_ref(

@@ -24,7 +24,7 @@ def _command_version(name: str, args: list[str]) -> tuple[bool, str]:
 
 
 def collect_checks(project_root: Path | None = None) -> list[dict]:
-    root = project_root or Path.cwd()
+    root = project_root or Path(__file__).resolve().parents[2]
     chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
     checks: list[dict] = []
     checks.append(
@@ -71,4 +71,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

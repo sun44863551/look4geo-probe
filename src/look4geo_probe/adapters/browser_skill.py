@@ -97,9 +97,15 @@ def select_main_answer(platform: str, candidates: list[str]) -> str:
     return usable[-1]
 
 
-def submission_confirmed(platform: str, before_url: str, after_url: str) -> bool:
+def submission_confirmed(
+    platform: str,
+    before_url: str,
+    after_url: str,
+    *,
+    answer_started: bool = False,
+) -> bool:
     marker = PLATFORMS[platform]["conversation_marker"]
-    return bool(after_url and after_url != before_url and marker in after_url)
+    return answer_started or bool(after_url and after_url != before_url and marker in after_url)
 
 
 class BskCliClient:
@@ -155,7 +161,13 @@ class BskCliClient:
             )
             await asyncio.sleep(self.poll_interval)
             after_url = await self._current_url(session_id)
-            if submission_confirmed(platform, before_url, after_url):
+            answer_page = await self._answer_page(session_id, config["answer_selector"])
+            answer_started = bool(
+                select_main_answer(platform, [str(value) for value in answer_page.get("answers", [])])
+            )
+            if submission_confirmed(
+                platform, before_url, after_url, answer_started=answer_started
+            ):
                 sent = True
                 break
         if not sent:
