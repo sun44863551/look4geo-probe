@@ -184,7 +184,9 @@ class BskCliClient:
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
         textbox_ref = self._find_textbox_ref(page_text, config["textbox"])
-        if not textbox_ref:
+        if not textbox_ref and not await self._composer_available(
+            session_id, config["composer_selector"]
+        ):
             final_url = str(navigation.get("final_url", ""))
             if "sign_in" in final_url or any(
                 marker in page_text for marker in config["login_markers"]
@@ -196,6 +198,11 @@ class BskCliClient:
         sent = False
         for _ in range(3):
             await self._enter_prompt(session_id, platform, textbox_ref, prompt, timeout=timeout)
+            if not await self._wait_submission_ready(session_id, platform):
+                return BrowserProbeOutput(
+                    failure=FailureKind.SEND_FAILED,
+                    diagnostic="composer remained disabled before submission",
+                )
             await self._submit_prompt(
                 session_id, platform, textbox_ref, timeout=timeout
             )
@@ -260,19 +267,19 @@ class BskCliClient:
         self,
         session_id: str,
         platform: str,
-        textbox_ref: str,
+        textbox_ref: str | None,
         prompt: str,
         *,
         timeout: float = 30.0,
     ) -> None:
-        try:
-            await self._run_json(
-                "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
-            )
-            return
-        except RuntimeError:
-            if platform not in {"chatgpt", "perplexity"}:
-                raise
+        if textbox_ref:
+            try:
+                await self._run_json(
+                    "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
+                )
+                return
+            except RuntimeError:
+                pass
 
         selector = PLATFORMS[platform]["composer_selector"]
         await self._run_json("click", selector, "--session", session_id, timeout=timeout)
@@ -287,7 +294,7 @@ class BskCliClient:
         self,
         session_id: str,
         platform: str,
-        textbox_ref: str,
+        textbox_ref: str | None,
         *,
         timeout: float = 30.0,
     ) -> None:
@@ -302,9 +309,40 @@ class BskCliClient:
                 timeout=timeout,
             )
             return
-        await self._run_json(
-            "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
+        if textbox_ref:
+            await self._run_json(
+                "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
+            )
+        else:
+            await self._run_json(
+                "press", "Enter", "--selector", PLATFORMS[platform]["composer_selector"],
+                "--session", session_id, timeout=timeout
+            )
+
+    async def _composer_available(self, session_id: str, selector: str) -> bool:
+        expression = f"Boolean(document.querySelector({json.dumps(selector)}))"
+        result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+        return bool(self._result_value(result))
+
+    async def _wait_submission_ready(
+        self, session_id: str, platform: str, *, rounds: int = 10
+    ) -> bool:
+        expression = (
+            "(() => { const buttons = [...document.querySelectorAll('button')].filter(b => "
+            "/发送|Send|提问|Ask Grok/i.test((b.getAttribute('aria-label') || '') + ' ' + "
+            "(b.getAttribute('title') || '') + ' ' + (b.innerText || '')) || b.type === 'submit'); "
+            "return {found: buttons.length > 0, ready: buttons.some(b => !b.disabled && "
+            "b.getAttribute('aria-disabled') !== 'true')}; })()"
         )
+        for _ in range(rounds):
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            state = self._result_value(result)
+            if isinstance(state, dict) and (not state.get("found") or state.get("ready")):
+                return True
+            await asyncio.sleep(self.poll_interval)
+        return False
 
     async def _current_url(self, session_id: str) -> str:
         result = await self._run_json(

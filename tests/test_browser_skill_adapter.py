@@ -90,6 +90,34 @@ class FillFallbackClient(BskCliClient):
         return {"value": True}
 
 
+class ComposerStateClient(BskCliClient):
+    def __init__(self, values):
+        super().__init__("browser", poll_interval=0)
+        self.values = iter(values)
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        return {"value": next(self.values)}
+
+
+@pytest.mark.asyncio
+async def test_selector_only_composer_is_available_without_accessibility_ref():
+    client = ComposerStateClient([True])
+
+    assert await client._composer_available("session", 'div[contenteditable="true"]') is True
+
+
+@pytest.mark.asyncio
+async def test_disabled_send_control_times_out_without_submitting():
+    client = ComposerStateClient(
+        [{"found": True, "ready": False}, {"found": True, "ready": False}]
+    )
+
+    assert await client._wait_submission_ready("session", "chatgpt", rounds=2) is False
+    assert len(client.calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes():
     client = FillFallbackClient()
