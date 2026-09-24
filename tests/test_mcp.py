@@ -5,7 +5,10 @@ from look4geo_probe.models import JobStatus, ProbeResult
 
 
 class FakeService:
+    last_request = None
+
     async def run(self, request):
+        self.last_request = request
         return {"job_id": "job-2", "selected_platforms": ["perplexity"], "reasons": {"perplexity": ["citation"]}, "status": JobStatus.RUNNING}
 
     def status(self, job_id):
@@ -35,3 +38,11 @@ async def test_mcp_result_is_structured_json_data():
     result = await tools.probe_result("job-2")
     assert result["schema_version"] == 1
     assert result["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_accepts_repeat_count():
+    service = FakeService()
+    tools = ProbeMcpTools(service)
+    await tools.probe_run("source?", repeats=3)
+    assert service.last_request.repeats == 3

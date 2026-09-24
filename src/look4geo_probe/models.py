@@ -27,6 +27,15 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class FailureKind(StrEnum):
+    LOGIN_REQUIRED = "login_required"
+    RATE_LIMITED = "rate_limited"
+    SEND_FAILED = "send_failed"
+    EXTRACTION_FAILED = "extraction_failed"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -36,6 +45,7 @@ class ProbeRequest(StrictModel):
     mode: RouteMode = RouteMode.AUTO
     platforms: list[str] = Field(default_factory=list)
     options: dict[str, Any] = Field(default_factory=dict)
+    repeats: int = Field(default=1, ge=1, le=10)
 
     @field_validator("prompt")
     @classmethod
@@ -86,6 +96,11 @@ class PlatformAttempt(StrictModel):
     normalized_answer: str = ""
     citations: list[Citation] = Field(default_factory=list)
     diagnostic: str | None = None
+    failure: FailureKind | None = None
+    query_original: str = ""
+    query_sent: str = ""
+    query_normalized: bool = False
+    sample_index: int = 1
     artifact_paths: list[str] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None

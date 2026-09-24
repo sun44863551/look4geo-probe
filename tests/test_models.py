@@ -24,3 +24,9 @@ def test_manual_mode_deduplicates_platforms_preserving_order():
 def test_result_schema_is_version_one():
     result = ProbeResult(job_id="job-1", prompt="test", status="succeeded")
     assert result.schema_version == 1
+
+
+def test_repeat_count_must_be_between_one_and_ten():
+    assert ProbeRequest(prompt="test", repeats=3).repeats == 3
+    with pytest.raises(ValidationError):
+        ProbeRequest(prompt="test", repeats=0)

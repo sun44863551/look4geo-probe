@@ -58,9 +58,18 @@ class ProbeService:
         }
 
     async def _execute(self, job_id: str, request: ProbeRequest, routing) -> None:
-        attempts = await asyncio.gather(
-            *(self.adapters[name].run(name, request) for name in routing.selected_platforms)
+        scheduled = [
+            (name, sample_index)
+            for name in routing.selected_platforms
+            for sample_index in range(1, request.repeats + 1)
+        ]
+        raw_attempts = await asyncio.gather(
+            *(self.adapters[name].run(name, request) for name, _ in scheduled)
         )
+        attempts = [
+            attempt.model_copy(update={"sample_index": sample_index})
+            for attempt, (_, sample_index) in zip(raw_attempts, scheduled, strict=True)
+        ]
         successes = sum(attempt.status == JobStatus.SUCCEEDED for attempt in attempts)
         waiting = any(attempt.status == JobStatus.WAITING_FOR_LOGIN for attempt in attempts)
         if successes == len(attempts):

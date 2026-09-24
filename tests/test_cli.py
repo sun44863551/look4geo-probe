@@ -7,7 +7,10 @@ from look4geo_probe.models import JobStatus, ProbeResult
 
 
 class FakeService:
+    last_request = None
+
     async def run(self, request):
+        self.last_request = request
         return {"job_id": "job-1", "selected_platforms": ["qwen"], "reasons": {}, "status": JobStatus.RUNNING}
 
     async def wait(self, job_id):
@@ -42,3 +45,11 @@ def test_cli_platforms_uses_same_service_interface():
     result = CliRunner().invoke(app, ["platforms", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.stdout)["qwen"]["available"] is True
+
+
+def test_cli_run_accepts_repeat_count():
+    service = FakeService()
+    set_service_factory(lambda: service)
+    result = CliRunner().invoke(app, ["run", "hello", "--repeats", "3", "--json"])
+    assert result.exit_code == 0
+    assert service.last_request.repeats == 3

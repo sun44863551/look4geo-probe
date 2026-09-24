@@ -33,12 +33,13 @@ def run(
     prompt: str,
     mode: RouteMode = typer.Option(RouteMode.AUTO),
     platform: list[str] = typer.Option(None),
+    repeats: int = typer.Option(1, min=1, max=10),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     async def execute():
         service = _service_factory()
         submission = await service.run(
-            ProbeRequest(prompt=prompt, mode=mode, platforms=platform or [])
+            ProbeRequest(prompt=prompt, mode=mode, platforms=platform or [], repeats=repeats)
         )
         await service.wait(submission["job_id"])
         return service.result(submission["job_id"])
@@ -77,4 +78,3 @@ def doctor(json_output: bool = typer.Option(False, "--json")) -> None:
     _print(payload, json_output)
     if not payload["summary"]["ok"]:
         raise typer.Exit(1)
-

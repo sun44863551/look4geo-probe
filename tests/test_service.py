@@ -74,3 +74,15 @@ async def test_partial_success_preserves_successful_attempt(tmp_path: Path):
     result = service.result(submission["job_id"])
     assert result.status == JobStatus.PARTIAL
     assert [a.platform for a in result.attempts if a.status == JobStatus.SUCCEEDED] == ["qwen"]
+
+
+@pytest.mark.asyncio
+async def test_repeats_create_independent_numbered_attempts(tmp_path: Path):
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(
+        FixedRouter(["chatgpt"]), store, {"chatgpt": ControlledAdapter("chatgpt")}
+    )
+    submission = await service.run(ProbeRequest(prompt="repeat", repeats=3))
+    await service.wait(submission["job_id"])
+    attempts = service.result(submission["job_id"]).attempts
+    assert [attempt.sample_index for attempt in attempts] == [1, 2, 3]

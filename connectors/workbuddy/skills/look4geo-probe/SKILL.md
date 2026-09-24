@@ -14,7 +14,7 @@ Use the private local CLI at:
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local`
 
 1. Run `probe run "<question>" --mode auto --json` unless the user requests named platforms or a comprehensive comparison.
-2. For explicit selection, add one or more `--platform <name>` options and use `--mode selected`.
+2. For explicit selection, add one or more `--platform <name>` options and use `--mode manual`.
 3. Tell the user which platforms were selected and why.
 4. The local CLI waits for completion and returns the result. Use `probe platforms --json` to inspect availability.
 5. For a login requirement, run `probe login <platform> --json` and let the user complete the visible browser step. Never ask for credentials or extract browser secrets.

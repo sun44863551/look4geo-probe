@@ -11,13 +11,18 @@ class ProbeMcpTools:
         self.service = service
 
     async def probe_run(
-        self, prompt: str, mode: str = "auto", platforms: list[str] | None = None
+        self,
+        prompt: str,
+        mode: str = "auto",
+        platforms: list[str] | None = None,
+        repeats: int = 1,
     ) -> dict:
         submission = await self.service.run(
             ProbeRequest(
                 prompt=prompt,
                 mode=RouteMode(mode),
                 platforms=platforms or [],
+                repeats=repeats,
             )
         )
         submission["status"] = submission["status"].value

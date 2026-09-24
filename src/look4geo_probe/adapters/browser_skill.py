@@ -8,23 +8,29 @@ from pathlib import Path
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
-from ..models import Citation, JobStatus, PlatformAttempt, ProbeRequest
+from ..models import Citation, FailureKind, JobStatus, PlatformAttempt, ProbeRequest
 
 PLATFORMS = {
     "chatgpt": {
         "url": "https://chatgpt.com/",
         "textbox": "给 ChatGPT 发消息",
         "login_markers": ("登录", "注册"),
+        "conversation_marker": "/c/",
+        "answer_selector": '[class*="MarkdownRoot-"]',
     },
     "deepseek": {
         "url": "https://chat.deepseek.com/",
         "textbox": "给 DeepSeek 发送消息",
         "login_markers": ("请输入手机号", "密码登录"),
+        "conversation_marker": "/a/chat/s/",
+        "answer_selector": ".ds-markdown, .markdown",
     },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
         "textbox": "输入 @ 以使用连接器",
         "login_markers": ("登录", "继续使用"),
+        "conversation_marker": "/search/",
+        "answer_selector": '[class*="prose"]',
     },
 }
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
@@ -36,6 +42,45 @@ class BrowserProbeOutput:
     answer: str = ""
     citations: list[str] = field(default_factory=list)
     login_required: bool = False
+    failure: FailureKind | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class NormalizedPrompt:
+    original: str
+    sent: str
+    changed: bool
+
+
+def normalize_for_browser(prompt: str) -> NormalizedPrompt:
+    replacements = {
+        "≥": ">=",
+        "≤": "<=",
+        "—": "-",
+        "–": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "\u00a0": " ",
+    }
+    sent = "".join(replacements.get(character, character) for character in prompt)
+    return NormalizedPrompt(original=prompt, sent=sent, changed=sent != prompt)
+
+
+def select_main_answer(platform: str, candidates: list[str]) -> str:
+    usable = [candidate.strip() for candidate in candidates if candidate.strip()]
+    if not usable:
+        return ""
+    if platform == "perplexity":
+        return max(usable, key=len)
+    return usable[-1]
+
+
+def submission_confirmed(platform: str, before_url: str, after_url: str) -> bool:
+    marker = PLATFORMS[platform]["conversation_marker"]
+    return bool(after_url and after_url != before_url and marker in after_url)
 
 
 class BskCliClient:
@@ -82,31 +127,94 @@ class BskCliClient:
                 return BrowserProbeOutput(login_required=True)
             raise RuntimeError(f"message textbox not found for {platform}")
 
-        await self._run_json(
-            "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
-        )
-        await self._run_json(
-            "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
-        )
+        before_url = str(navigation.get("final_url") or navigation.get("url") or config["url"])
+        sent = False
+        for _ in range(3):
+            await self._run_json(
+                "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
+            )
+            await self._run_json(
+                "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
+            )
+            await asyncio.sleep(self.poll_interval)
+            after_url = await self._current_url(session_id)
+            if submission_confirmed(platform, before_url, after_url):
+                sent = True
+                break
+        if not sent:
+            return BrowserProbeOutput(
+                failure=FailureKind.SEND_FAILED,
+                diagnostic="conversation URL did not change after 3 attempts",
+            )
 
         deadline = asyncio.get_running_loop().time() + timeout
         previous = ""
         stable_rounds = 0
+        empty_rounds = 0
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
-            current = await self._run_json("observe", "--session", session_id, timeout=30)
-            current_text = str(current.get("text", ""))
-            if current_text != page_text and current_text == previous:
+            page = await self._answer_page(session_id, config["answer_selector"])
+            candidates = [str(value) for value in page.get("answers", [])]
+            current_text = select_main_answer(platform, candidates)
+            if not current_text:
+                empty_rounds += 1
+                if empty_rounds >= 10:
+                    return BrowserProbeOutput(
+                        failure=FailureKind.EXTRACTION_FAILED,
+                        diagnostic="answer area remained empty for 10 polls",
+                    )
+                continue
+            empty_rounds = 0
+            lowered = current_text.casefold()
+            if "429" in lowered or "rate limit" in lowered or "请求过于频繁" in current_text:
+                return BrowserProbeOutput(
+                    failure=FailureKind.RATE_LIMITED, diagnostic="platform rate limit detected"
+                )
+            if current_text == previous:
                 stable_rounds += 1
                 if stable_rounds >= 2:
                     return BrowserProbeOutput(
                         answer=current_text,
-                        citations=list(dict.fromkeys(URL_PATTERN.findall(current_text))),
+                        citations=list(
+                            dict.fromkeys(
+                                [str(url) for url in page.get("links", [])]
+                                + URL_PATTERN.findall(current_text)
+                            )
+                        ),
                     )
             else:
                 stable_rounds = 0
             previous = current_text
         raise asyncio.TimeoutError
+
+    async def _current_url(self, session_id: str) -> str:
+        result = await self._run_json(
+            "evaluate", "location.href", "--session", session_id, timeout=30
+        )
+        value = self._result_value(result)
+        return str(value or "")
+
+    async def _answer_page(self, session_id: str, selector: str) -> dict:
+        expression = (
+            "(() => { const nodes = [...document.querySelectorAll("
+            + json.dumps(selector)
+            + ")]; return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
+            "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))]}; })()"
+        )
+        result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+        value = self._result_value(result)
+        return value if isinstance(value, dict) else {"answers": [], "links": []}
+
+    @staticmethod
+    def _result_value(result):
+        if not isinstance(result, dict):
+            return result
+        if "value" in result:
+            return result["value"]
+        nested = result.get("result")
+        if isinstance(nested, dict) and "value" in nested:
+            return nested["value"]
+        return nested if nested is not None else result
 
     async def stop(self, session_id: str) -> None:
         await self._run_json("session", "stop", session_id)
@@ -146,12 +254,13 @@ class BrowserSkillAdapter(ProbeAdapter):
                 diagnostic=f"unsupported platform: {platform}",
             )
         session_id: str | None = None
+        normalized = normalize_for_browser(request.prompt)
         try:
             session_id = await self.client.start(platform)
             output = await self.client.probe(
                 session_id,
                 platform,
-                request.prompt,
+                normalized.sent,
                 float(request.options.get("timeout", self.default_timeout)),
             )
             if output.login_required:
@@ -160,6 +269,21 @@ class BrowserSkillAdapter(ProbeAdapter):
                     adapter=self.name,
                     status=JobStatus.WAITING_FOR_LOGIN,
                     diagnostic="login required",
+                    failure=FailureKind.LOGIN_REQUIRED,
+                    query_original=normalized.original,
+                    query_sent=normalized.sent,
+                    query_normalized=normalized.changed,
+                )
+            if output.failure is not None:
+                return PlatformAttempt(
+                    platform=platform,
+                    adapter=self.name,
+                    status=JobStatus.FAILED,
+                    diagnostic=output.diagnostic or output.failure.value,
+                    failure=output.failure,
+                    query_original=normalized.original,
+                    query_sent=normalized.sent,
+                    query_normalized=normalized.changed,
                 )
             return PlatformAttempt(
                 platform=platform,
@@ -168,6 +292,9 @@ class BrowserSkillAdapter(ProbeAdapter):
                 raw_answer=output.answer,
                 normalized_answer=output.answer.strip(),
                 citations=[Citation(url=url) for url in output.citations],
+                query_original=normalized.original,
+                query_sent=normalized.sent,
+                query_normalized=normalized.changed,
             )
         except asyncio.TimeoutError:
             return PlatformAttempt(
@@ -175,6 +302,10 @@ class BrowserSkillAdapter(ProbeAdapter):
                 adapter=self.name,
                 status=JobStatus.FAILED,
                 diagnostic="timeout",
+                failure=FailureKind.TIMEOUT,
+                query_original=normalized.original,
+                query_sent=normalized.sent,
+                query_normalized=normalized.changed,
             )
         except Exception as error:
             return PlatformAttempt(
@@ -182,6 +313,10 @@ class BrowserSkillAdapter(ProbeAdapter):
                 adapter=self.name,
                 status=JobStatus.FAILED,
                 diagnostic=str(error),
+                failure=FailureKind.UNKNOWN,
+                query_original=normalized.original,
+                query_sent=normalized.sent,
+                query_normalized=normalized.changed,
             )
         finally:
             if session_id is not None:
