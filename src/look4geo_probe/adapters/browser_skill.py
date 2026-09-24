@@ -13,21 +13,24 @@ from ..models import Citation, FailureKind, JobStatus, PlatformAttempt, ProbeReq
 PLATFORMS = {
     "chatgpt": {
         "url": "https://chatgpt.com/",
-        "textbox": "给 ChatGPT 发消息",
+        "textbox": ("给 ChatGPT 发消息",),
+        "composer_selector": 'div[contenteditable="true"]',
         "login_markers": ("登录", "注册"),
         "conversation_marker": "/c/",
         "answer_selector": '[class*="MarkdownRoot-"]',
     },
     "deepseek": {
         "url": "https://chat.deepseek.com/",
-        "textbox": "给 DeepSeek 发送消息",
+        "textbox": ("给 DeepSeek 发送消息",),
+        "composer_selector": 'textarea, div[contenteditable="true"]',
         "login_markers": ("请输入手机号", "密码登录"),
         "conversation_marker": "/a/chat/s/",
         "answer_selector": ".ds-markdown, .markdown",
     },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
-        "textbox": "输入 @ 以使用连接器",
+        "textbox": ("输入 @ 以使用连接器", "问任何事情..."),
+        "composer_selector": 'div[contenteditable="true"]',
         "login_markers": ("登录", "继续使用"),
         "conversation_marker": "/search/",
         "answer_selector": '[class*="prose"]',
@@ -35,6 +38,22 @@ PLATFORMS = {
 }
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
+
+
+def command_error_detail(stdout: bytes, stderr: bytes) -> str:
+    stderr_text = stderr.decode(errors="replace").strip()
+    if stderr_text:
+        return stderr_text
+    stdout_text = stdout.decode(errors="replace").strip()
+    if stdout_text:
+        try:
+            payload = json.loads(stdout_text)
+            code = str(payload.get("code") or "bsk_error")
+            message = str(payload.get("message") or payload.get("hint") or "command failed")
+            return f"{code}: {message}"
+        except (json.JSONDecodeError, AttributeError):
+            return stdout_text
+    return "bsk command failed"
 
 
 @dataclass(frozen=True)
@@ -100,7 +119,7 @@ class BskCliClient:
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         if process.returncode != 0:
-            raise RuntimeError(stderr.decode(errors="replace").strip() or "bsk command failed")
+            raise RuntimeError(command_error_detail(stdout, stderr))
         return json.loads(stdout.decode("utf-8"))
 
     async def start(self, platform: str) -> str:
@@ -130,11 +149,9 @@ class BskCliClient:
         before_url = str(navigation.get("final_url") or navigation.get("url") or config["url"])
         sent = False
         for _ in range(3):
-            await self._run_json(
-                "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
-            )
-            await self._run_json(
-                "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
+            await self._enter_prompt(session_id, platform, textbox_ref, prompt, timeout=timeout)
+            await self._submit_prompt(
+                session_id, platform, textbox_ref, timeout=timeout
             )
             await asyncio.sleep(self.poll_interval)
             after_url = await self._current_url(session_id)
@@ -187,6 +204,56 @@ class BskCliClient:
             previous = current_text
         raise asyncio.TimeoutError
 
+    async def _enter_prompt(
+        self,
+        session_id: str,
+        platform: str,
+        textbox_ref: str,
+        prompt: str,
+        *,
+        timeout: float = 30.0,
+    ) -> None:
+        try:
+            await self._run_json(
+                "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
+            )
+            return
+        except RuntimeError:
+            if platform not in {"chatgpt", "perplexity"}:
+                raise
+
+        selector = PLATFORMS[platform]["composer_selector"]
+        await self._run_json("click", selector, "--session", session_id, timeout=timeout)
+        await self._run_json(
+            "press", "Meta+A", "--selector", selector, "--session", session_id, timeout=timeout
+        )
+        await self._run_json("press", "Backspace", "--session", session_id, timeout=timeout)
+        expression = f"document.execCommand('insertText', false, {json.dumps(prompt)})"
+        await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
+
+    async def _submit_prompt(
+        self,
+        session_id: str,
+        platform: str,
+        textbox_ref: str,
+        *,
+        timeout: float = 30.0,
+    ) -> None:
+        if platform in {"chatgpt", "perplexity"}:
+            await self._run_json(
+                "press",
+                "Enter",
+                "--selector",
+                PLATFORMS[platform]["composer_selector"],
+                "--session",
+                session_id,
+                timeout=timeout,
+            )
+            return
+        await self._run_json(
+            "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
+        )
+
     async def _current_url(self, session_id: str) -> str:
         result = await self._run_json(
             "evaluate", "location.href", "--session", session_id, timeout=30
@@ -220,9 +287,12 @@ class BskCliClient:
         await self._run_json("session", "stop", session_id)
 
     @staticmethod
-    def _find_textbox_ref(page_text: str, expected_label: str) -> str | None:
+    def _find_textbox_ref(
+        page_text: str, expected_label: str | tuple[str, ...]
+    ) -> str | None:
+        expected = (expected_label,) if isinstance(expected_label, str) else expected_label
         for ref, label in REF_PATTERN.findall(page_text):
-            if label == expected_label:
+            if label in expected:
                 return ref
         return None
 

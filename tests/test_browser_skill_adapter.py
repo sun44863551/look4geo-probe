@@ -3,11 +3,13 @@ from pathlib import Path
 import pytest
 
 from look4geo_probe.adapters.browser_skill import (
+    BskCliClient,
     BrowserProbeOutput,
     BrowserSkillAdapter,
     normalize_for_browser,
     submission_confirmed,
     select_main_answer,
+    command_error_detail,
 )
 from look4geo_probe.models import FailureKind, JobStatus, ProbeRequest
 
@@ -39,6 +41,60 @@ def test_submission_confirmation_requires_new_conversation_url(
     platform, before, after, expected
 ):
     assert submission_confirmed(platform, before, after) is expected
+
+
+def test_textbox_lookup_accepts_current_perplexity_label():
+    page = '@e18 textbox "问任何事情..." [empty]'
+    assert BskCliClient._find_textbox_ref(
+        page, ("输入 @ 以使用连接器", "问任何事情...")
+    ) == "@e18"
+
+
+def test_bsk_error_detail_reads_json_message_from_stdout():
+    stdout = b'{"code":"cdp_failed","message":"fill target changed"}'
+    assert command_error_detail(stdout, b"") == "cdp_failed: fill target changed"
+
+
+class FillFallbackClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser")
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "fill":
+            raise RuntimeError("fill target changed or lost focus before typing")
+        return {"value": True}
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes():
+    client = FillFallbackClient()
+    await client._enter_prompt("session", "chatgpt", "@e42", "hello")
+    commands = [call[0] for call in client.calls]
+    assert commands == ["fill", "click", "press", "press", "evaluate"]
+    assert "insertText" in client.calls[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_submits_using_stable_composer_selector():
+    client = FillFallbackClient()
+    await client._submit_prompt("session", "chatgpt", "@e42")
+    assert client.calls[-1][:4] == (
+        "press",
+        "Enter",
+        "--selector",
+        'div[contenteditable="true"]',
+    )
+
+
+@pytest.mark.asyncio
+async def test_perplexity_uses_native_input_and_stable_submit_on_fill_change():
+    client = FillFallbackClient()
+    await client._enter_prompt("session", "perplexity", "@e18", "hello")
+    assert "insertText" in client.calls[-1][1]
+    await client._submit_prompt("session", "perplexity", "@e18")
+    assert client.calls[-1][:3] == ("press", "Enter", "--selector")
 
 
 class FakeBrowserClient:
