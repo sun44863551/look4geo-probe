@@ -13,11 +13,11 @@ Use the private local CLI at:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local`
 
-1. Run `probe run "<question>" --mode auto --json` unless the user requests named platforms or a comprehensive comparison.
-2. For explicit selection, add one or more `--platform <name>` options and use `--mode manual`.
+1. Run `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode auto --json` unless the user requests named platforms or a comprehensive comparison.
+2. For explicit selection, add one or more `--platform <name>` options and use `--mode manual`, for example `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --json`.
 3. Tell the user which platforms were selected and why.
-4. The local CLI waits for completion and returns the result. Use `probe platforms --json` to inspect availability.
-5. For a login requirement, run `probe login <platform> --json` and let the user complete the visible browser step. Never ask for credentials or extract browser secrets.
+4. The local CLI waits for completion and returns the result. Use the same absolute script path with `platforms --json` to inspect availability.
+5. For a login requirement, use the same absolute script path with `login <platform> --json` and let the user complete the visible browser step. Never ask for credentials or extract browser secrets.
 6. Keep successful platform results when another platform fails and state the failure clearly.
 
 Do not upload, publish, or install this project through WorkBuddy's public Experts, Skills, or Connectors catalog. The code, browser credentials, job database, and results must remain on this Mac.
