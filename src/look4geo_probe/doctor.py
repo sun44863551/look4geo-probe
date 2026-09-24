@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -12,8 +13,10 @@ def summarize_checks(checks: list[dict]) -> dict:
     return {"ok": not failed, "failed": failed}
 
 
-def _command_version(name: str, args: list[str]) -> tuple[bool, str]:
-    executable = shutil.which(name)
+def _command_version(
+    name: str, args: list[str], *, executable: str | None = None
+) -> tuple[bool, str]:
+    executable = executable or shutil.which(name)
     if not executable:
         return False, "missing"
     completed = subprocess.run(
@@ -35,13 +38,13 @@ def collect_checks(project_root: Path | None = None) -> list[dict]:
             "detail": sys.version.split()[0],
         }
     )
-    for name, args, required in (
-        ("node", ["--version"], True),
-        ("git", ["--version"], True),
-        ("bsk", ["--version"], True),
-        ("docker", ["--version"], False),
+    for name, args, required, executable in (
+        ("node", ["--version"], True, os.environ.get("LOOK4GEO_NODE")),
+        ("git", ["--version"], True, None),
+        ("bsk", ["--version"], True, None),
+        ("docker", ["--version"], False, None),
     ):
-        ok, detail = _command_version(name, args)
+        ok, detail = _command_version(name, args, executable=executable)
         checks.append({"name": name, "required": required, "ok": ok, "detail": detail})
     checks.extend(
         [
