@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import JobStatus, ProbeRequest
+from .models import JobStatus, ProbeRequest, ProbeResult
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,14 @@ class ProbeStore:
                     diagnostic TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS results (
+                    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+                    result_json TEXT NOT NULL
                 )
                 """
             )
@@ -108,3 +116,18 @@ class ProbeStore:
             )
         return recovered
 
+    def save_result(self, result: ProbeResult) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO results (job_id, result_json) VALUES (?, ?)",
+                (result.job_id, result.model_dump_json()),
+            )
+
+    def get_result(self, job_id: str) -> ProbeResult:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        return ProbeResult.model_validate_json(row["result_json"])
