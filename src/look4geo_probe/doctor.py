@@ -17,11 +17,14 @@ def _command_version(
     name: str, args: list[str], *, executable: str | None = None
 ) -> tuple[bool, str]:
     executable = executable or shutil.which(name)
-    if not executable:
+    if not executable or (os.path.sep in executable and not Path(executable).is_file()):
         return False, "missing"
-    completed = subprocess.run(
-        [executable, *args], capture_output=True, text=True, timeout=10, check=False
-    )
+    try:
+        completed = subprocess.run(
+            [executable, *args], capture_output=True, text=True, timeout=10, check=False
+        )
+    except OSError:
+        return False, "missing"
     detail = (completed.stdout or completed.stderr).strip().splitlines()
     return completed.returncode == 0, detail[0] if detail else executable
 

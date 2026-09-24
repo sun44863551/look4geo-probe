@@ -37,3 +37,16 @@ def test_doctor_uses_explicit_node_when_path_is_empty(tmp_path, monkeypatch):
 
     assert checks["node"]["ok"] is True
     assert checks["node"]["detail"] == "v22.22.2"
+
+
+def test_doctor_reports_missing_explicit_node_without_crashing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_NODE", str(tmp_path / "missing-node"))
+
+    checks = {check["name"]: check for check in collect_checks()}
+
+    assert checks["node"] == {
+        "name": "node",
+        "required": True,
+        "ok": False,
+        "detail": "missing",
+    }
