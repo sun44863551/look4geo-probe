@@ -73,6 +73,13 @@ def test_textbox_lookup_accepts_current_perplexity_label():
     ) == "@e18"
 
 
+def test_textbox_lookup_accepts_current_chatgpt_label():
+    page = '@e17 textbox "询问 ChatGPT" [empty]'
+    assert BskCliClient._find_textbox_ref(
+        page, PLATFORMS["chatgpt"]["textbox"]
+    ) == "@e17"
+
+
 def test_bsk_error_detail_reads_json_message_from_stdout():
     stdout = b'{"code":"cdp_failed","message":"fill target changed"}'
     assert command_error_detail(stdout, b"") == "cdp_failed: fill target changed"
@@ -106,6 +113,16 @@ async def test_selector_only_composer_is_available_without_accessibility_ref():
     client = ComposerStateClient([True])
 
     assert await client._composer_available("session", 'div[contenteditable="true"]') is True
+
+
+@pytest.mark.asyncio
+async def test_delayed_composer_is_retried_until_available():
+    client = ComposerStateClient([False, False, True])
+
+    assert await client._wait_composer_available(
+        "session", 'div[contenteditable="true"]', rounds=3
+    ) is True
+    assert len(client.calls) == 3
 
 
 @pytest.mark.asyncio

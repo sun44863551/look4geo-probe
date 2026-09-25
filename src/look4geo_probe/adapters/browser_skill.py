@@ -21,7 +21,7 @@ PLATFORMS = {
     },
     "chatgpt": {
         "url": "https://chatgpt.com/",
-        "textbox": ("给 ChatGPT 发消息",),
+        "textbox": ("给 ChatGPT 发消息", "询问 ChatGPT"),
         "composer_selector": 'div[contenteditable="true"]',
         "login_markers": ("登录", "注册"),
         "conversation_marker": "/c/",
@@ -184,7 +184,7 @@ class BskCliClient:
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
         textbox_ref = self._find_textbox_ref(page_text, config["textbox"])
-        if not textbox_ref and not await self._composer_available(
+        if not textbox_ref and not await self._wait_composer_available(
             session_id, config["composer_selector"]
         ):
             final_url = str(navigation.get("final_url", ""))
@@ -323,6 +323,15 @@ class BskCliClient:
         expression = f"Boolean(document.querySelector({json.dumps(selector)}))"
         result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
         return bool(self._result_value(result))
+
+    async def _wait_composer_available(
+        self, session_id: str, selector: str, *, rounds: int = 10
+    ) -> bool:
+        for _ in range(rounds):
+            if await self._composer_available(session_id, selector):
+                return True
+            await asyncio.sleep(self.poll_interval)
+        return False
 
     async def _wait_submission_ready(
         self, session_id: str, platform: str, *, rounds: int = 10
