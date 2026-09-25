@@ -43,23 +43,28 @@ def test_both_skills_have_discriminating_frontmatter():
         assert "probe" in path.read_text(encoding="utf-8").casefold()
 
 
-def test_workbuddy_runtime_uses_existing_browser_for_all_platforms(tmp_path, monkeypatch):
+def test_codex_and_workbuddy_use_same_adapter_policy(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "browser-test")
 
-    adapters = build_adapters(tmp_path, runtime="workbuddy")
+    workbuddy = build_adapters(tmp_path, runtime="workbuddy")
+    default = build_adapters(tmp_path, runtime="default")
 
-    assert set(adapters) == {
+    assert set(workbuddy) == {
         "doubao", "deepseek", "yuanbao", "qwen",
         "chatgpt", "gemini", "perplexity", "grok",
     }
-    assert {adapter.name for adapter in adapters.values()} == {"browser_skill"}
+    assert {
+        platform: adapter.adapter_names for platform, adapter in workbuddy.items()
+    } == {
+        platform: adapter.adapter_names for platform, adapter in default.items()
+    }
 
 
-def test_default_runtime_preserves_ai_search_hub_primaries(tmp_path, monkeypatch):
+def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "browser-test")
 
     adapters = build_adapters(tmp_path, runtime="default")
 
-    assert adapters["doubao"].name == "ai_search_hub"
-    assert adapters["gemini"].name == "ai_search_hub"
-    assert adapters["chatgpt"].name == "browser_skill"
+    assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["chatgpt"].adapter_names == ["browser_skill"]

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .adapters.ai_search_hub import AIHubAdapter
 from .adapters.browser_skill import BskCliClient, BrowserSkillAdapter
+from .adapters.registry import AdapterChain
 from .config import load_configuration
 from .router import Router
 from .service import ProbeService
@@ -17,23 +18,17 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         client=BskCliClient(os.environ.get("LOOK4GEO_BROWSER_ID", "")),
         artifact_root=root / "data/runs",
     )
-    if runtime == "workbuddy":
-        return {
-            platform: browser
-            for platform in (
-                "doubao", "deepseek", "yuanbao", "qwen",
-                "chatgpt", "gemini", "perplexity", "grok",
-            )
-        }
+    del runtime  # Both callers intentionally use one machine-local adapter policy.
+    fallback_platforms = {"doubao", "yuanbao", "qwen", "gemini", "grok"}
     return {
-        "doubao": ai_hub,
-        "yuanbao": ai_hub,
-        "qwen": ai_hub,
-        "gemini": ai_hub,
-        "grok": ai_hub,
-        "deepseek": browser,
-        "chatgpt": browser,
-        "perplexity": browser,
+        platform: AdapterChain(
+            platform,
+            [browser, ai_hub] if platform in fallback_platforms else [browser],
+        )
+        for platform in (
+            "doubao", "deepseek", "yuanbao", "qwen",
+            "chatgpt", "gemini", "perplexity", "grok",
+        )
     }
 
 

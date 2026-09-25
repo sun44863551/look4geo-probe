@@ -79,6 +79,15 @@ PLATFORMS = {
 }
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
+TRANSIENT_ANSWER_LINES = {
+    "正在搜索网络",
+    "跳过",
+    "搜索中",
+    "思考中",
+    "generating",
+    "searching the web",
+    "skip",
+}
 
 
 def command_error_detail(stdout: bytes, stderr: bytes) -> str:
@@ -130,12 +139,36 @@ def normalize_for_browser(prompt: str) -> NormalizedPrompt:
 
 
 def select_main_answer(platform: str, candidates: list[str]) -> str:
-    usable = [candidate.strip() for candidate in candidates if candidate.strip()]
+    usable = [candidate.strip() for candidate in candidates if is_valid_answer(candidate)]
     if not usable:
         return ""
     if platform == "perplexity":
         return max(usable, key=len)
     return usable[-1]
+
+
+def is_valid_answer(candidate: str) -> bool:
+    lines = [line.strip() for line in candidate.splitlines() if line.strip()]
+    if not lines:
+        return False
+    meaningful = [line for line in lines if line.casefold() not in TRANSIENT_ANSWER_LINES]
+    return bool(meaningful)
+
+
+def answers_after_baseline(candidates: list[str], baseline: list[str]) -> list[str]:
+    """Return only answer nodes that are new or changed since prompt submission."""
+    baseline_counts: dict[str, int] = {}
+    for answer in baseline:
+        normalized = answer.strip()
+        baseline_counts[normalized] = baseline_counts.get(normalized, 0) + 1
+    delta: list[str] = []
+    for answer in candidates:
+        normalized = answer.strip()
+        if baseline_counts.get(normalized, 0):
+            baseline_counts[normalized] -= 1
+        else:
+            delta.append(answer)
+    return delta
 
 
 def submission_confirmed(
@@ -199,53 +232,29 @@ class BskCliClient:
                 return BrowserProbeOutput(login_required=True)
             raise RuntimeError(f"message textbox not found for {platform}")
 
-        before_url = str(navigation.get("final_url") or navigation.get("url") or config["url"])
-        sent = False
-        for _ in range(3):
-            await self._enter_prompt(session_id, platform, textbox_ref, prompt, timeout=timeout)
-            if not await self._wait_submission_ready(session_id, platform):
-                return BrowserProbeOutput(
-                    failure=FailureKind.SEND_FAILED,
-                    diagnostic="composer remained disabled before submission",
-                )
-            await self._submit_prompt(
-                session_id, platform, textbox_ref, timeout=timeout
-            )
-            await asyncio.sleep(self.poll_interval)
-            after_url = await self._current_url(session_id)
-            answer_page = await self._answer_page(session_id, config["answer_selector"])
-            answer_started = bool(
-                select_main_answer(platform, [str(value) for value in answer_page.get("answers", [])])
-            )
-            if submission_confirmed(
-                platform, before_url, after_url, answer_started=answer_started
-            ):
-                sent = True
-                break
-        if not sent:
+        baseline_page = await self._answer_page(session_id, config["answer_selector"])
+        baseline = [str(value) for value in baseline_page.get("answers", [])]
+        await self._enter_prompt(session_id, platform, textbox_ref, prompt, timeout=timeout)
+        if not await self._wait_submission_ready(session_id, platform):
             return BrowserProbeOutput(
                 failure=FailureKind.SEND_FAILED,
-                diagnostic="conversation URL did not change after 3 attempts",
+                diagnostic="composer remained disabled before submission",
             )
+        await self._submit_prompt(session_id, platform, textbox_ref, timeout=timeout)
 
         deadline = asyncio.get_running_loop().time() + timeout
         previous = ""
         stable_rounds = 0
-        empty_rounds = 0
+        saw_answer_candidate = False
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
             candidates = [str(value) for value in page.get("answers", [])]
-            current_text = select_main_answer(platform, candidates)
+            delta = answers_after_baseline(candidates, baseline)
+            saw_answer_candidate = saw_answer_candidate or bool(delta)
+            current_text = select_main_answer(platform, delta)
             if not current_text:
-                empty_rounds += 1
-                if empty_rounds >= 10:
-                    return BrowserProbeOutput(
-                        failure=FailureKind.EXTRACTION_FAILED,
-                        diagnostic="answer area remained empty for 10 polls",
-                    )
                 continue
-            empty_rounds = 0
             lowered = current_text.casefold()
             if "429" in lowered or "rate limit" in lowered or "请求过于频繁" in current_text:
                 return BrowserProbeOutput(
@@ -266,6 +275,11 @@ class BskCliClient:
             else:
                 stable_rounds = 0
             previous = current_text
+        if saw_answer_candidate:
+            return BrowserProbeOutput(
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="new answer candidates never became valid and stable",
+            )
         raise asyncio.TimeoutError
 
     async def _enter_prompt(
@@ -292,6 +306,18 @@ class BskCliClient:
             "press", "Meta+A", "--selector", selector, "--session", session_id, timeout=timeout
         )
         await self._run_json("press", "Backspace", "--session", session_id, timeout=timeout)
+        if platform == "perplexity":
+            try:
+                await self._run_json(
+                    "fill", "--selector", selector, "--no-clear", "--value", prompt,
+                    "--session", session_id, timeout=timeout
+                )
+                return
+            except RuntimeError as error:
+                if "fill could not verify the expected value" in str(error):
+                    value = await self._composer_text(session_id, selector)
+                    if value.strip() == prompt.strip():
+                        return
         expression = f"document.execCommand('insertText', false, {json.dumps(prompt)})"
         await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
 
@@ -303,6 +329,15 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "perplexity":
+            try:
+                await self._run_json(
+                    "click", 'button[aria-label="提交"], button[aria-label="Submit"]',
+                    "--session", session_id, timeout=timeout
+                )
+                return
+            except RuntimeError:
+                pass
         if platform in {"chatgpt", "perplexity"}:
             await self._run_json(
                 "press",
@@ -323,6 +358,16 @@ class BskCliClient:
                 "press", "Enter", "--selector", PLATFORMS[platform]["composer_selector"],
                 "--session", session_id, timeout=timeout
             )
+
+    async def _composer_text(self, session_id: str, selector: str) -> str:
+        expression = (
+            "(() => { const node = document.querySelector(" + json.dumps(selector) + "); "
+            "return node ? (node.innerText || node.textContent || node.value || '') : ''; })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        return str(self._result_value(result) or "")
 
     async def _composer_available(self, session_id: str, selector: str) -> bool:
         expression = f"Boolean(document.querySelector({json.dumps(selector)}))"

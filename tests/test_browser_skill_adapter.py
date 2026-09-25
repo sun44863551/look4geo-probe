@@ -92,7 +92,7 @@ class FillFallbackClient(BskCliClient):
 
     async def _run_json(self, *args, timeout=30.0):
         self.calls.append(args)
-        if args[0] == "fill":
+        if args[0] == "fill" and str(args[1]).startswith("@"):
             raise RuntimeError("fill target changed or lost focus before typing")
         return {"value": True}
 
@@ -122,6 +122,40 @@ class LoginOverlayClient(BskCliClient):
         if args[0] == "evaluate":
             return {"value": True}
         return {"ok": True}
+
+
+class DelayedAnswerClient(BskCliClient):
+    def __init__(self, pages):
+        super().__init__("browser", poll_interval=0)
+        self.pages = iter(pages)
+        self.last_page = {"answers": [], "links": []}
+        self.submit_count = 0
+
+    async def _run_json(self, *args, timeout=30.0):
+        if args[0] == "navigate":
+            return {"final_url": "https://www.perplexity.ai/"}
+        if args[0] == "observe":
+            return {"text": '@e18 textbox "问任何事情..." [empty]'}
+        return {"value": True}
+
+    async def _enter_prompt(self, *args, **kwargs):
+        return None
+
+    async def _wait_submission_ready(self, *args, **kwargs):
+        return True
+
+    async def _submit_prompt(self, *args, **kwargs):
+        self.submit_count += 1
+
+    async def _current_url(self, session_id):
+        return "https://www.perplexity.ai/"
+
+    async def _answer_page(self, session_id, selector):
+        try:
+            self.last_page = next(self.pages)
+        except StopIteration:
+            pass
+        return self.last_page
 
 
 @pytest.mark.asyncio
@@ -191,12 +225,49 @@ async def test_chatgpt_submits_using_stable_composer_selector():
 
 
 @pytest.mark.asyncio
-async def test_perplexity_uses_native_input_and_stable_submit_on_fill_change():
+async def test_perplexity_uses_native_input_and_submit_button_on_fill_change():
     client = FillFallbackClient()
     await client._enter_prompt("session", "perplexity", "@e18", "hello")
-    assert "insertText" in client.calls[-1][1]
+    assert client.calls[-1][:2] == ("fill", "--selector")
+    assert "--no-clear" in client.calls[-1]
     await client._submit_prompt("session", "perplexity", "@e18")
-    assert client.calls[-1][:3] == ("press", "Enter", "--selector")
+    assert client.calls[-1][:2] == ("click", 'button[aria-label="提交"], button[aria-label="Submit"]')
+
+
+@pytest.mark.asyncio
+async def test_slow_spa_response_is_submitted_once_and_detected_by_answer_delta():
+    client = DelayedAnswerClient(
+        [
+            {"answers": ["old answer"], "links": []},
+            {"answers": ["old answer"], "links": []},
+            {"answers": ["old answer"], "links": []},
+            {"answers": ["old answer", "new complete answer"], "links": []},
+            {"answers": ["old answer", "new complete answer"], "links": []},
+            {"answers": ["old answer", "new complete answer"], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "perplexity", "question", timeout=1)
+
+    assert client.submit_count == 1
+    assert output.answer == "new complete answer"
+
+
+@pytest.mark.asyncio
+async def test_qwen_transient_controls_are_not_accepted_as_answers():
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": []},
+            {"answers": ["正在搜索网络\n跳过"], "links": []},
+            {"answers": ["正在搜索网络\n跳过"], "links": []},
+            {"answers": ["正在搜索网络\n跳过"], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "qwen", "question", timeout=0.01)
+
+    assert output.failure in {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
+    assert output.answer == ""
 
 
 class FakeBrowserClient:
