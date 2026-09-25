@@ -108,6 +108,22 @@ class ComposerStateClient(BskCliClient):
         return {"value": next(self.values)}
 
 
+class LoginOverlayClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+
+    async def _run_json(self, *args, timeout=30.0):
+        if args[0] == "navigate":
+            return {"final_url": "https://yuanbao.tencent.com/chat/naQivTmsDa"}
+        if args[0] == "observe":
+            return {
+                "text": 'StaticText "微信登录"\nStaticText "请使用微信扫描二维码登录"'
+            }
+        if args[0] == "evaluate":
+            return {"value": True}
+        return {"ok": True}
+
+
 @pytest.mark.asyncio
 async def test_selector_only_composer_is_available_without_accessibility_ref():
     client = ComposerStateClient([True])
@@ -123,6 +139,24 @@ async def test_delayed_composer_is_retried_until_available():
         "session", 'div[contenteditable="true"]', rounds=3
     ) is True
     assert len(client.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_login_overlay_wins_over_hidden_composer():
+    client = LoginOverlayClient()
+
+    output = await client.probe("session", "yuanbao", "hello", timeout=1)
+
+    assert output.login_required is True
+    assert output.failure is None
+
+
+def test_doubao_answer_boundary_targets_message_content():
+    assert PLATFORMS["doubao"]["answer_selector"] == '[data-testid="message_text_content"]'
+
+
+def test_gemini_answer_boundary_excludes_prompt_and_navigation():
+    assert PLATFORMS["gemini"]["answer_selector"] == "model-response-content message-content"
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ PLATFORMS = {
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "扫码登录"),
         "conversation_marker": "/chat/",
-        "answer_selector": '[class*="assistant"], [class*="markdown"], [data-message-author-role="assistant"]',
+        "answer_selector": '[data-testid="message_text_content"]',
     },
     "chatgpt": {
         "url": "https://chatgpt.com/",
@@ -40,6 +40,7 @@ PLATFORMS = {
         "textbox": ("输入消息", "有问题尽管问我", "给元宝发送消息"),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
         "login_markers": ("登录", "微信扫码登录", "上次登录"),
+        "blocking_login_markers": ("微信登录", "请使用微信扫描二维码登录"),
         "conversation_marker": "/chat/",
         "answer_selector": '[data-role="assistant"], [class*="assistant"], [class*="markdown"], [class*="answer"]',
     },
@@ -57,7 +58,7 @@ PLATFORMS = {
         "composer_selector": 'rich-textarea textarea, textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "Sign in", "Continue with Google"),
         "conversation_marker": "/app/",
-        "answer_selector": 'message-content, [data-response-id], [class*="response"], [class*="markdown"]',
+        "answer_selector": "model-response-content message-content",
     },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
@@ -183,6 +184,10 @@ class BskCliClient:
         )
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
+        if any(
+            marker in page_text for marker in config.get("blocking_login_markers", ())
+        ):
+            return BrowserProbeOutput(login_required=True)
         textbox_ref = self._find_textbox_ref(page_text, config["textbox"])
         if not textbox_ref and not await self._wait_composer_available(
             session_id, config["composer_selector"]
