@@ -65,6 +65,14 @@ def test_qwen_selects_full_answer_not_nested_tail_fragment():
     assert answer == full_answer
 
 
+def test_yuanbao_selects_full_answer_not_nested_source_url():
+    full_answer = "完整回答：" + ("供应商、规格、来源与采购核验建议。" * 20)
+
+    assert select_main_answer(
+        "yuanbao", [full_answer, "https://example.com/source"]
+    ) == full_answer
+
+
 def test_text_url_extraction_drops_markdown_list_separator_after_url():
     text = "来源：https://example.com/product/123-abc-\n1\n下一项"
 

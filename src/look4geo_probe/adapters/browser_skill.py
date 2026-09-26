@@ -281,7 +281,7 @@ def select_main_answer(platform: str, candidates: list[str]) -> str:
     usable = [candidate.strip() for candidate in candidates if is_valid_answer(candidate)]
     if not usable:
         return ""
-    if platform in {"perplexity", "qwen"}:
+    if platform in {"perplexity", "qwen", "yuanbao"}:
         return max(usable, key=len)
     return usable[-1]
 
