@@ -8,6 +8,7 @@ from look4geo_probe.adapters.browser_skill import (
     BrowserProbeOutput,
     BrowserSkillAdapter,
     PLATFORMS,
+    answer_links_for_text,
     normalize_for_browser,
     submission_confirmed,
     select_main_answer,
@@ -526,6 +527,82 @@ async def test_domestic_platforms_keep_citations_when_panel_open_fails(platform)
     assert [source.source_role for source in sources] == [SourceRole.CITED]
     assert status == SourceCaptureStatus.FAILED
     assert diagnostic == "panel unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_international_platforms_collect_cited_and_surfaced_fixture_sources(platform):
+    fixture = load_source_fixture(platform)
+    panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}], [panel_page, panel_page]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.url for source in sources] == [
+        "https://evidence.example/spec?id=42",
+        "https://market.example/supplier",
+    ]
+    assert [source.source_role for source in sources] == [
+        SourceRole.CITED,
+        SourceRole.SURFACED,
+    ]
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_international_platforms_report_none_exposed_without_trigger(platform):
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_international_platforms_keep_citations_when_panel_open_fails(platform):
+    fixture = load_source_fixture(platform)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": False, "diagnostic": "panel unavailable"}]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.source_role for source in sources] == [SourceRole.CITED]
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "panel unavailable"
+
+
+def test_perplexity_links_stay_scoped_to_selected_longest_answer():
+    page = {
+        "answer_entries": [
+            {
+                "text": "Short follow-up?",
+                "links": [{"url": "https://follow-up.example", "title": "Suggestion"}],
+            },
+            {
+                "text": "This is the complete researched answer with suppliers and evidence.",
+                "links": [{"url": "https://evidence.example", "title": "Evidence"}],
+            },
+        ]
+    }
+
+    assert answer_links_for_text(
+        page, "This is the complete researched answer with suppliers and evidence."
+    ) == [{"url": "https://evidence.example", "title": "Evidence"}]
 
 
 @pytest.mark.asyncio

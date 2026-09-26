@@ -143,6 +143,47 @@ PLATFORMS["qwen"].update(
         "excluded_source_domains": ("qwen.ai",),
     }
 )
+PLATFORMS["chatgpt"].update(
+    {
+        "source_trigger_labels": ("Sources", "来源", "引用"),
+        "source_trigger_selectors": ('button[aria-label*="source" i]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("chatgpt.com",),
+    }
+)
+PLATFORMS["gemini"].update(
+    {
+        "source_trigger_labels": ("View source details", "Sources", "来源"),
+        "source_trigger_selectors": (
+            'button[aria-label*="View source details" i]',
+        ),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("gemini.google.com",),
+    }
+)
+PLATFORMS["perplexity"].update(
+    {
+        "source_trigger_labels": ("个来源", "来源", "Sources"),
+        "source_panel_selectors": ('[class*="max-h-[300px]"]',),
+        "source_panel_labels": ("来源", "Sources", "链接"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("perplexity.ai",),
+    }
+)
+PLATFORMS["grok"].update(
+    {
+        "source_trigger_labels": ("Sources", "来源", "网页"),
+        "source_trigger_selectors": ('button[aria-label*="source" i]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("grok.com",),
+    }
+)
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
 TRANSIENT_ANSWER_LINES = {
@@ -287,6 +328,16 @@ def answers_after_baseline(candidates: list[str], baseline: list[str]) -> list[s
     return delta
 
 
+def answer_links_for_text(page: dict, answer: str) -> list[dict[str, str]]:
+    target = answer.strip()
+    entries = page.get("answer_entries", [])
+    for entry in reversed(entries if isinstance(entries, list) else []):
+        if str(entry.get("text") or "").strip() == target:
+            return list(entry.get("links", []))
+    links = page.get("answer_links", [])
+    return list(links) if isinstance(links, list) else []
+
+
 def submission_confirmed(
     platform: str,
     before_url: str,
@@ -403,7 +454,7 @@ class BskCliClient:
             elif current_text == previous:
                 stable_rounds += 1
                 if stable_rounds >= 2:
-                    answer_links = list(page.get("answer_links", []))
+                    answer_links = answer_links_for_text(page, current_text)
                     if not answer_links:
                         answer_links = [
                             {"url": str(url), "title": None}
@@ -597,6 +648,9 @@ class BskCliClient:
             + ")]; const bodyText = document.body ? (document.body.innerText || '') : ''; "
             "const buttons = [...document.querySelectorAll('button')]; "
             "return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
+            "answer_entries:nodes.map(n => ({text:(n.innerText || '').trim(),links:"
+            "[...n.querySelectorAll('a[href]')].map(a => ({url:a.href,title:"
+            "(a.innerText || a.textContent || '').trim() || null}))})).filter(entry => entry.text),"
             "answer_links:nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => "
             "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
             "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
@@ -732,6 +786,7 @@ class BskCliClient:
             "for (const selector of selectors) { trigger = root.querySelector(selector) || "
             "document.querySelector(selector); if (trigger) break; } "
             "if (!trigger && labels.length) { const controls = [...root.querySelectorAll("
+            "'button,[role=button],a,[onclick]'), ...document.querySelectorAll("
             "'button,[role=button],a,[onclick]')]; trigger = controls.find(node => { const text = "
             "((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim(); "
             "return labels.some(label => text.includes(label)); }); } "

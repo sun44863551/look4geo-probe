@@ -1,0 +1,11 @@
+{
+  "platform": "gemini",
+  "observation": "citation buttons expose a View source details aria-label and open a role=dialog hover card containing an external anchor",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=gemini", "title": "Evidence"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}
