@@ -9,6 +9,7 @@ from pathlib import Path
 from .base import ProbeAdapter
 from .types import AdapterHealth
 from ..models import Citation, FailureKind, JobStatus, PlatformAttempt, ProbeRequest
+from ..validity import CONTAMINATION_RE
 
 PLATFORMS = {
     "doubao": {
@@ -96,7 +97,9 @@ RATE_LIMIT_MARKERS = (
     "使用权限将在几小时后重置",
     "free searches limit",
 )
-PREAMBLE_PATTERN = re.compile(r"^(我会|我先|我将|I(?:['’]?ll| will)|Let me)\b", re.I)
+PREAMBLE_PATTERN = re.compile(
+    r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
+)
 
 
 def command_error_detail(stdout: bytes, stderr: bytes) -> str:
@@ -179,6 +182,14 @@ def page_is_rate_limited(page: dict) -> bool:
 
 def is_incomplete_preamble(platform: str, answer: str) -> bool:
     return platform == "chatgpt" and len(answer) < 300 and bool(PREAMBLE_PATTERN.match(answer))
+
+
+def is_context_contamination(platform: str, prompt: str, answer: str) -> bool:
+    return (
+        platform == "chatgpt"
+        and bool(CONTAMINATION_RE.search(answer))
+        and not bool(CONTAMINATION_RE.search(prompt))
+    )
 
 
 def answers_after_baseline(candidates: list[str], baseline: list[str]) -> list[str]:
@@ -287,7 +298,9 @@ class BskCliClient:
             current_text = select_main_answer(platform, delta)
             if not current_text:
                 continue
-            if is_incomplete_preamble(platform, current_text):
+            if is_incomplete_preamble(platform, current_text) or is_context_contamination(
+                platform, prompt, current_text
+            ):
                 previous = current_text
                 stable_rounds = 0
                 continue

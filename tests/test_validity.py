@@ -21,12 +21,14 @@ def test_measurement_success_rejects_prompt_echo():
 
 def test_measurement_success_rejects_short_preamble_and_contamination():
     preamble = result("research", [succeeded("I’ll first verify the suppliers.")])
+    chinese_preamble = result("research", [succeeded("我会把厂家身份、现货证据和价格分开核验。")])
     contaminated = result(
         "research",
         [succeeded("Look4GEO 主线进度：Hanyu S1 等待批准。" + "x" * 400)],
     )
 
     assert result_is_clean_success(preamble, expected_repeats=1, min_answer_chars=20) is False
+    assert result_is_clean_success(chinese_preamble, expected_repeats=1, min_answer_chars=20) is False
     assert result_is_clean_success(contaminated, expected_repeats=1, min_answer_chars=20) is False
 
 

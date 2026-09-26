@@ -9,7 +9,9 @@ CONTAMINATION_RE = re.compile(
     r"Look4GEO|GEO\s*客户系统|主线进度|USER_APPROVAL_FOR_HANYU|Hanyu\s*S0|Hanyu\s*S1\s*批准",
     re.I,
 )
-PREAMBLE_RE = re.compile(r"^(我会|我先|我将|I(?:['’]?ll| will)|Let me)\b", re.I)
+PREAMBLE_RE = re.compile(
+    r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
+)
 STUB_RE = re.compile(
     r"^(正在运行代码解释器|正在思考|正在搜索网络|搜索中|加载中|跳过)(?:…|\.\.\.)?(?:\s*跳过)?$",
     re.I,

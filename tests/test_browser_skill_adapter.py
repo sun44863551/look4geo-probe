@@ -291,7 +291,7 @@ async def test_grok_prompt_echo_is_ignored_until_real_answer_arrives():
 @pytest.mark.asyncio
 async def test_chatgpt_does_not_finish_while_generation_is_running():
     preamble = "我会先核实生产商、库存与监管证据。"
-    complete = preamble + "\n完整答案：供应商 A 有公开库存证据，供应商 B 有监管备案。"
+    complete = preamble + "\n完整答案：" + ("供应商 A 有公开库存与监管证据。" * 20)
     client = DelayedAnswerClient(
         [
             {"answers": [], "links": [], "generating": False},
@@ -326,6 +326,40 @@ async def test_chatgpt_short_preamble_is_not_success_without_generation_signal()
 
     assert output.failure == FailureKind.EXTRACTION_FAILED
     assert output.answer == ""
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_chinese_preamble_is_not_success():
+    preamble = "我会把厂家身份、现货证据、价格分开核验，避免把平台报价误当成厂家库存。"
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": []},
+            {"answers": [preamble], "links": []},
+            {"answers": [preamble], "links": []},
+            {"answers": [preamble], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "chatgpt", "Research suppliers", timeout=0.01)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_project_context_contamination_is_not_success():
+    contaminated = "主线进度：继续围绕 Look4GEO 的化工询盘能力做可验证证据测试。"
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": []},
+            {"answers": [contaminated], "links": []},
+            {"answers": [contaminated], "links": []},
+            {"answers": [contaminated], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "chatgpt", "Research suppliers", timeout=0.01)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
 
 
 @pytest.mark.asyncio
