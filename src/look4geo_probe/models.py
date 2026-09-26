@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class RouteMode(StrEnum):
@@ -34,6 +34,23 @@ class FailureKind(StrEnum):
     EXTRACTION_FAILED = "extraction_failed"
     TIMEOUT = "timeout"
     UNKNOWN = "unknown"
+
+
+class SourceRole(StrEnum):
+    CITED = "cited"
+    SURFACED = "surfaced"
+
+
+class SourceEvidenceOrigin(StrEnum):
+    ANSWER_DOM = "answer_dom"
+    SOURCE_PANEL = "source_panel"
+
+
+class SourceCaptureStatus(StrEnum):
+    CAPTURED = "captured"
+    NONE_EXPOSED = "none_exposed"
+    UNSUPPORTED = "unsupported"
+    FAILED = "failed"
 
 
 class StrictModel(BaseModel):
@@ -88,6 +105,16 @@ class Citation(StrictModel):
     label: str | None = None
 
 
+class SourceRecord(StrictModel):
+    url: str
+    title: str | None = None
+    domain: str
+    snippet: str | None = None
+    source_role: SourceRole
+    evidence_origin: SourceEvidenceOrigin
+    linked_in_answer: bool
+
+
 class PlatformAttempt(StrictModel):
     platform: str
     adapter: str
@@ -95,6 +122,9 @@ class PlatformAttempt(StrictModel):
     raw_answer: str = ""
     normalized_answer: str = ""
     citations: list[Citation] = Field(default_factory=list)
+    sources: list[SourceRecord] = Field(default_factory=list)
+    source_capture_status: SourceCaptureStatus = SourceCaptureStatus.NONE_EXPOSED
+    source_capture_diagnostic: str | None = None
     diagnostic: str | None = None
     failure: FailureKind | None = None
     query_original: str = ""
