@@ -185,7 +185,7 @@ PLATFORMS["grok"].update(
     }
 )
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
-URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
+URL_PATTERN = re.compile(r"https?://[^\s<>\])}\u200b\u2060]+")
 
 
 def extract_text_urls(text: str) -> list[str]:

@@ -79,6 +79,12 @@ def test_text_url_extraction_drops_markdown_list_separator_after_url():
     assert extract_text_urls(text) == ["https://example.com/product/123-abc"]
 
 
+def test_text_url_extraction_stops_at_invisible_source_label_separator():
+    text = "链接：https://example.com/product?id=42\u2060ExampleSource"
+
+    assert extract_text_urls(text) == ["https://example.com/product?id=42"]
+
+
 @pytest.mark.parametrize(
     ("platform", "before", "after", "expected"),
     [
