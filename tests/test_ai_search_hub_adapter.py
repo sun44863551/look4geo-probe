@@ -75,7 +75,10 @@ async def test_ai_hub_timeout_is_failed_attempt(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_ai_hub_answer_without_urls_is_none_exposed(tmp_path: Path):
     output = tmp_path / "answer.txt"
-    output.write_text("没有展示外部信源的完整回答", encoding="utf-8")
+    output.write_text(
+        "这是一个已经完成的回答，页面没有展示任何外部信源，但正文内容仍然有效。",
+        encoding="utf-8",
+    )
     runner = FakeRunner(CommandResult(0, "done", ""))
     adapter = AIHubAdapter(tmp_path, runner=runner)
 
@@ -87,3 +90,20 @@ async def test_ai_hub_answer_without_urls_is_none_exposed(tmp_path: Path):
     assert attempt.sources == []
     assert attempt.citations == []
     assert attempt.source_capture_status == SourceCaptureStatus.NONE_EXPOSED
+
+
+@pytest.mark.asyncio
+async def test_ai_hub_rejects_landing_page_placeholder_as_success(tmp_path: Path):
+    output = tmp_path / "answer.txt"
+    output.write_text("有什么可以帮你的吗？\n自动", encoding="utf-8")
+    adapter = AIHubAdapter(
+        tmp_path, runner=FakeRunner(CommandResult(0, "done", ""))
+    )
+
+    attempt = await adapter.run(
+        "qwen", ProbeRequest(prompt="请查找供应商", options={"output": str(output)})
+    )
+
+    assert attempt.status == JobStatus.FAILED
+    assert attempt.failure.value == "extraction_failed"
+    assert "valid answer" in (attempt.diagnostic or "")
