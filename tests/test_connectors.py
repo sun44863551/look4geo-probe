@@ -68,3 +68,22 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
     assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
+
+
+def test_local_connector_instructions_preserve_private_cli_contract():
+    codex = (ROOT / "connectors/codex/SKILL.md").read_text(encoding="utf-8")
+    workbuddy = (
+        ROOT / "connectors/workbuddy/skills/look4geo-probe/SKILL.md"
+    ).read_text(encoding="utf-8")
+    readme = (ROOT / "connectors/workbuddy/README.md").read_text(encoding="utf-8")
+
+    for text in (codex, workbuddy):
+        assert "scripts/probe-local" in text
+        assert "--mode manual" in text
+        assert "--platform" in text
+        assert "source_capture_status" in text
+        assert "none_exposed" in text
+        assert "failed" in text
+
+    assert "public" in readme.casefold()
+    assert "must not be uploaded" in readme

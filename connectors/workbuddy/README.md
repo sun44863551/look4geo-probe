@@ -18,5 +18,17 @@ package. The CLI and MCP interfaces both use the same local service and data.
 The checked-in paths are specific to this Mac mini deployment. If the project
 directory or BrowserSkill browser ID changes, update `mcp.json` locally.
 
+Both Codex and WorkBuddy must call the repository-local
+`scripts/probe-local` entrypoint (or the optional local stdio MCP server). They
+must not copy the implementation into a public WorkBuddy skill area. Manual
+platform selection remains `--mode manual` with one or more repeated
+`--platform <name>` flags.
+
+Results keep answer status separate from source capture. `captured` means at
+least one visibly exposed source was collected, `none_exposed` means the UI
+showed none, and `failed` carries a `source_capture_diagnostic` without turning
+a successful answer into a failed answer. Source roles distinguish links
+`cited` in the answer from links merely `surfaced` in a visible source panel.
+
 All browser credentials remain in the user's Chrome profile. Probe jobs and
 results remain in the local SQLite database under `data/`.
