@@ -95,10 +95,54 @@ for _platform_config in PLATFORMS.values():
             "source_trigger_labels": (),
             "source_trigger_selectors": (),
             "source_panel_selectors": (),
+            "source_panel_labels": (),
             "source_card_selectors": (),
+            "source_url_attributes": ("href",),
             "excluded_source_domains": (),
         }
     )
+
+PLATFORMS["doubao"].update(
+    {
+        "source_trigger_labels": ("来源", "参考资料", "网页"),
+        "source_trigger_selectors": ('[data-testid*="source"]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("来源", "参考资料"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("doubao.com",),
+    }
+)
+PLATFORMS["deepseek"].update(
+    {
+        "source_trigger_labels": ("个网页", "搜索到"),
+        "source_panel_labels": ("搜索结果",),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("deepseek.com",),
+    }
+)
+PLATFORMS["yuanbao"].update(
+    {
+        "source_trigger_labels": ("源", "引用来源"),
+        "source_panel_selectors": (".agent-dialogue-references",),
+        "source_panel_labels": ("引用来源",),
+        "source_card_selectors": (".agent-dialogue-references__item",),
+        "source_url_attributes": ("data-url", "href"),
+        "excluded_source_domains": ("yuanbao.tencent.com",),
+    }
+)
+PLATFORMS["qwen"].update(
+    {
+        "source_trigger_labels": ("Sources", "来源", "网页"),
+        "source_trigger_selectors": (
+            'button[aria-label*="source" i]',
+            'button[aria-label*="来源"]',
+        ),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("qwen.ai",),
+    }
+)
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
 TRANSIENT_ANSWER_LINES = {
@@ -688,7 +732,7 @@ class BskCliClient:
             "for (const selector of selectors) { trigger = root.querySelector(selector) || "
             "document.querySelector(selector); if (trigger) break; } "
             "if (!trigger && labels.length) { const controls = [...root.querySelectorAll("
-            "'button,[role=button],a')]; trigger = controls.find(node => { const text = "
+            "'button,[role=button],a,[onclick]')]; trigger = controls.find(node => { const text = "
             "((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim(); "
             "return labels.some(label => text.includes(label)); }); } "
             "if (!trigger) return {found:false,opened:false}; "
@@ -706,15 +750,27 @@ class BskCliClient:
         expression = (
             "(() => { const panelSelectors = "
             + json.dumps(list(config["source_panel_selectors"]))
+            + "; const panelLabels = "
+            + json.dumps(list(config["source_panel_labels"]), ensure_ascii=False)
             + "; const cardSelectors = "
             + json.dumps(list(config["source_card_selectors"]))
+            + "; const urlAttributes = "
+            + json.dumps(list(config["source_url_attributes"]))
             + "; const panels = panelSelectors.flatMap(selector => "
-            "[...document.querySelectorAll(selector)]); if (!panels.length) "
-            "return {panel_found:false,cards:[]}; const cards = panels.flatMap(panel => "
+            "[...document.querySelectorAll(selector)]); if (!panels.length && panelLabels.length) { "
+            "const labelled = [...document.querySelectorAll('h1,h2,h3,h4,[role=heading]')].filter("
+            "node => panelLabels.some(label => (node.innerText || '').includes(label))); "
+            "for (const heading of labelled) { let node = heading; for (let depth = 0; node && depth < 6; "
+            "depth += 1, node = node.parentElement) { if (cardSelectors.some(selector => "
+            "node.querySelector(selector))) { panels.push(node); break; } } } } "
+            "if (!panels.length) return {panel_found:false,cards:[]}; const cards = panels.flatMap(panel => "
             "cardSelectors.flatMap(selector => [...panel.querySelectorAll(selector)])); "
             "return {panel_found:true,cards:cards.map(card => { const anchor = "
-            "card.matches('a[href]') ? card : card.querySelector('a[href]'); return {"
-            "url:anchor ? anchor.href : '', title:((card.querySelector('h1,h2,h3,h4,[role=heading]')"
+            "card.matches('a[href]') ? card : card.querySelector('a[href]'); const urlNode = "
+            "card.matches('[href],[data-url]') ? card : card.querySelector('[href],[data-url]'); "
+            "const url = urlAttributes.map(attribute => attribute === 'href' ? urlNode?.href : "
+            "urlNode?.getAttribute(attribute)).find(Boolean) || (anchor ? anchor.href : ''); return {"
+            "url, title:((card.querySelector('h1,h2,h3,h4,[role=heading]')"
             " || anchor || card).innerText || '').trim() || null, snippet:(card.innerText || '')"
             ".trim() || null}; })}; })()"
         )

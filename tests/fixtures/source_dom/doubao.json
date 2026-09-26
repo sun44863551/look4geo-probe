@@ -1,0 +1,11 @@
+{
+  "platform": "doubao",
+  "observation": "answer DOM exposes external redirect anchors; no source panel was exposed in the observed answer",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=doubao", "title": "Product evidence"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}

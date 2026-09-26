@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,15 @@ def configure_source_panel(monkeypatch, platform="chatgpt"):
         "excluded_source_domains": ("chatgpt.com",),
     }
     monkeypatch.setitem(PLATFORMS, platform, config)
+
+
+DOMESTIC_SOURCE_FIXTURES = Path(__file__).parent / "fixtures" / "source_dom"
+
+
+def load_source_fixture(platform):
+    return json.loads(
+        (DOMESTIC_SOURCE_FIXTURES / f"{platform}.json").read_text(encoding="utf-8")
+    )
 
 
 @pytest.mark.asyncio
@@ -459,6 +469,63 @@ async def test_stale_source_trigger_is_reobserved_only_once(monkeypatch):
     assert sources[0].source_role == SourceRole.SURFACED
     assert status == SourceCaptureStatus.CAPTURED
     assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "qwen"])
+async def test_domestic_platforms_collect_cited_and_surfaced_fixture_sources(platform):
+    fixture = load_source_fixture(platform)
+    panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}], [panel_page, panel_page]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.url for source in sources] == [
+        "https://evidence.example/spec?id=42",
+        "https://market.example/supplier",
+    ]
+    assert [source.source_role for source in sources] == [
+        SourceRole.CITED,
+        SourceRole.SURFACED,
+    ]
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "qwen"])
+async def test_domestic_platforms_report_none_exposed_when_trigger_is_absent(platform):
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "qwen"])
+async def test_domestic_platforms_keep_citations_when_panel_open_fails(platform):
+    fixture = load_source_fixture(platform)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": False, "diagnostic": "panel unavailable"}]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.source_role for source in sources] == [SourceRole.CITED]
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "panel unavailable"
 
 
 @pytest.mark.asyncio
