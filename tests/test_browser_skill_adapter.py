@@ -18,8 +18,10 @@ from look4geo_probe.models import (
     ProbeRequest,
     SourceCaptureStatus,
     SourceEvidenceOrigin,
+    SourceRecord,
     SourceRole,
 )
+from look4geo_probe.sources import citations_from_sources
 
 
 def test_normalize_for_browser_preserves_original_and_records_changes():
@@ -635,15 +637,62 @@ class FakeBrowserClient:
 
 @pytest.mark.asyncio
 async def test_browser_adapter_returns_answer_and_stops_session(tmp_path: Path):
+    sources = [
+        SourceRecord(
+            url="https://example.com/source",
+            title="Evidence",
+            domain="example.com",
+            snippet=None,
+            source_role=SourceRole.CITED,
+            evidence_origin=SourceEvidenceOrigin.ANSWER_DOM,
+            linked_in_answer=True,
+        ),
+        SourceRecord(
+            url="https://other.example/card",
+            title="Related source",
+            domain="other.example",
+            snippet="Visible in source panel",
+            source_role=SourceRole.SURFACED,
+            evidence_origin=SourceEvidenceOrigin.SOURCE_PANEL,
+            linked_in_answer=False,
+        ),
+    ]
     client = FakeBrowserClient(
-        BrowserProbeOutput(answer="回答内容", citations=["https://example.com/source"])
+        BrowserProbeOutput(
+            answer="回答内容",
+            citations=["https://wrong.example/legacy"],
+            sources=sources,
+            source_capture_status=SourceCaptureStatus.CAPTURED,
+        )
     )
     adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
     attempt = await adapter.run("chatgpt", ProbeRequest(prompt="测试"))
     assert attempt.status == JobStatus.SUCCEEDED
     assert attempt.raw_answer == "回答内容"
-    assert attempt.citations[0].url == "https://example.com/source"
+    assert attempt.sources == sources
+    assert attempt.citations == citations_from_sources(sources)
+    assert attempt.source_capture_status == SourceCaptureStatus.CAPTURED
+    assert attempt.source_capture_diagnostic is None
     assert client.stopped == ["session-1"]
+
+
+@pytest.mark.asyncio
+async def test_browser_adapter_keeps_answer_success_when_source_capture_failed(tmp_path: Path):
+    client = FakeBrowserClient(
+        BrowserProbeOutput(
+            answer="回答内容",
+            source_capture_status=SourceCaptureStatus.FAILED,
+            source_capture_diagnostic="source panel changed",
+        )
+    )
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    attempt = await adapter.run("chatgpt", ProbeRequest(prompt="测试"))
+
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.raw_answer == "回答内容"
+    assert attempt.source_capture_status == SourceCaptureStatus.FAILED
+    assert attempt.source_capture_diagnostic == "source panel changed"
 
 
 @pytest.mark.asyncio
@@ -692,6 +741,7 @@ async def test_browser_adapter_classifies_rate_limit_without_counting_success(tm
     assert attempt.status == JobStatus.FAILED
     assert attempt.failure == FailureKind.RATE_LIMITED
     assert attempt.raw_answer == ""
+    assert attempt.sources == []
 
 
 @pytest.mark.asyncio

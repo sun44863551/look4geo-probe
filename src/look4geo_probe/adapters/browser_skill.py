@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 from .base import ProbeAdapter
 from .types import AdapterHealth
 from ..models import (
-    Citation,
     FailureKind,
     JobStatus,
     PlatformAttempt,
@@ -20,7 +19,7 @@ from ..models import (
     SourceRecord,
     SourceRole,
 )
-from ..sources import merge_sources, normalize_source_url
+from ..sources import citations_from_sources, merge_sources, normalize_source_url
 from ..validity import CONTAMINATION_RE
 
 PLATFORMS = {
@@ -814,7 +813,10 @@ class BrowserSkillAdapter(ProbeAdapter):
                 status=JobStatus.SUCCEEDED,
                 raw_answer=output.answer,
                 normalized_answer=output.answer.strip(),
-                citations=[Citation(url=url) for url in output.citations],
+                citations=citations_from_sources(output.sources),
+                sources=output.sources,
+                source_capture_status=output.source_capture_status,
+                source_capture_diagnostic=output.source_capture_diagnostic,
                 query_original=normalized.original,
                 query_sent=normalized.sent,
                 query_normalized=normalized.changed,
