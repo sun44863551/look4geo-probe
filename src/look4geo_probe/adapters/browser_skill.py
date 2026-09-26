@@ -47,7 +47,7 @@ PLATFORMS = {
     },
     "qwen": {
         "url": "https://chat.qwen.ai/",
-        "textbox": ("输入消息", "How can I help you today?", "Ask anything"),
+        "textbox": ("询问 Qwen", "输入消息", "How can I help you today?", "Ask anything"),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
         "login_markers": ("登录", "Sign in", "Continue with Google"),
         "conversation_marker": "/c/",
@@ -96,6 +96,12 @@ RATE_LIMIT_MARKERS = (
     "已达到免费搜索次数上限",
     "使用权限将在几小时后重置",
     "free searches limit",
+)
+HUMAN_VERIFICATION_MARKERS = (
+    "请确认你的年龄以继续",
+    "你出生于哪一年",
+    "通过验证以确保正常访问",
+    "请拖动下方滑块完成验证",
 )
 PREAMBLE_PATTERN = re.compile(
     r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
@@ -154,7 +160,7 @@ def select_main_answer(platform: str, candidates: list[str]) -> str:
     usable = [candidate.strip() for candidate in candidates if is_valid_answer(candidate)]
     if not usable:
         return ""
-    if platform == "perplexity":
+    if platform in {"perplexity", "qwen"}:
         return max(usable, key=len)
     return usable[-1]
 
@@ -178,6 +184,11 @@ def is_prompt_echo(candidate: str, prompt: str) -> bool:
 def page_is_rate_limited(page: dict) -> bool:
     text = str(page.get("page_text") or "").casefold()
     return bool(page.get("rate_limited")) or any(marker.casefold() in text for marker in RATE_LIMIT_MARKERS)
+
+
+def page_requires_human_verification(page: dict) -> bool:
+    text = str(page.get("page_text") or "")
+    return any(marker in text for marker in HUMAN_VERIFICATION_MARKERS)
 
 
 def is_incomplete_preamble(platform: str, answer: str) -> bool:
@@ -254,6 +265,11 @@ class BskCliClient:
         )
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
+        if page_requires_human_verification({"page_text": page_text}):
+            return BrowserProbeOutput(
+                login_required=True,
+                diagnostic="human verification required",
+            )
         if any(
             marker in page_text for marker in config.get("blocking_login_markers", ())
         ):
@@ -286,6 +302,11 @@ class BskCliClient:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
+            if page_requires_human_verification(page):
+                return BrowserProbeOutput(
+                    login_required=True,
+                    diagnostic="human verification required",
+                )
             if page_is_rate_limited(page):
                 return BrowserProbeOutput(
                     failure=FailureKind.RATE_LIMITED,
@@ -380,6 +401,15 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "qwen":
+            try:
+                await self._run_json(
+                    "click", 'button[aria-label="发送"], button[aria-label="Send"]',
+                    "--session", session_id, timeout=timeout
+                )
+                return
+            except RuntimeError:
+                pass
         if platform == "chatgpt":
             try:
                 await self._run_json(
@@ -552,7 +582,7 @@ class BrowserSkillAdapter(ProbeAdapter):
                     platform=platform,
                     adapter=self.name,
                     status=JobStatus.WAITING_FOR_LOGIN,
-                    diagnostic="login required",
+                    diagnostic=output.diagnostic or "login required",
                     failure=FailureKind.LOGIN_REQUIRED,
                     query_original=normalized.original,
                     query_sent=normalized.sent,
