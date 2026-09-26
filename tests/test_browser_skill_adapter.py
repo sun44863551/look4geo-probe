@@ -9,6 +9,7 @@ from look4geo_probe.adapters.browser_skill import (
     BrowserSkillAdapter,
     PLATFORMS,
     answer_links_for_text,
+    extract_text_urls,
     normalize_for_browser,
     submission_confirmed,
     select_main_answer,
@@ -62,6 +63,12 @@ def test_qwen_selects_full_answer_not_nested_tail_fragment():
     )
 
     assert answer == full_answer
+
+
+def test_text_url_extraction_drops_markdown_list_separator_after_url():
+    text = "来源：https://example.com/product/123-abc-\n1\n下一项"
+
+    assert extract_text_urls(text) == ["https://example.com/product/123-abc"]
 
 
 @pytest.mark.parametrize(

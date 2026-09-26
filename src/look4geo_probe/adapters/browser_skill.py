@@ -186,6 +186,18 @@ PLATFORMS["grok"].update(
 )
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
+
+
+def extract_text_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in URL_PATTERN.finditer(text):
+        url = match.group(0).rstrip(".,;:!?，。；：！？'\"")
+        following = text[match.end() :]
+        if url.endswith("-") and re.match(r"\r?\n\d+(?:\r?\n|$)", following):
+            url = url[:-1]
+        if url:
+            urls.append(url)
+    return urls
 TRANSIENT_ANSWER_LINES = {
     "正在搜索网络",
     "跳过",
@@ -462,7 +474,7 @@ class BskCliClient:
                         ]
                     answer_links.extend(
                         {"url": url, "title": None}
-                        for url in URL_PATTERN.findall(current_text)
+                        for url in extract_text_urls(current_text)
                     )
                     try:
                         sources, source_status, source_diagnostic = (
