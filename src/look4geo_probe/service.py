@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from .jobs import JobManager
 from .models import (
@@ -61,9 +62,16 @@ class ProbeService:
         attempts = []
         for name in routing.selected_platforms:
             for sample_index in range(1, request.repeats + 1):
+                started_at = datetime.now(timezone.utc)
                 attempt = await self.adapters[name].run(name, request)
                 attempts.append(
-                    attempt.model_copy(update={"sample_index": sample_index})
+                    attempt.model_copy(
+                        update={
+                            "sample_index": sample_index,
+                            "started_at": started_at,
+                            "finished_at": attempt.finished_at or datetime.now(timezone.utc),
+                        }
+                    )
                 )
         successes = sum(attempt.status == JobStatus.SUCCEEDED for attempt in attempts)
         waiting = any(attempt.status == JobStatus.WAITING_FOR_LOGIN for attempt in attempts)

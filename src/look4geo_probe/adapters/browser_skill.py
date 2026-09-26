@@ -88,6 +88,15 @@ TRANSIENT_ANSWER_LINES = {
     "searching the web",
     "skip",
 }
+RATE_LIMIT_MARKERS = (
+    "429",
+    "rate limit",
+    "请求过于频繁",
+    "已达到免费搜索次数上限",
+    "使用权限将在几小时后重置",
+    "free searches limit",
+)
+PREAMBLE_PATTERN = re.compile(r"^(我会|我先|我将|I(?:['’]?ll| will)|Let me)\b", re.I)
 
 
 def command_error_detail(stdout: bytes, stderr: bytes) -> str:
@@ -153,6 +162,23 @@ def is_valid_answer(candidate: str) -> bool:
         return False
     meaningful = [line for line in lines if line.casefold() not in TRANSIENT_ANSWER_LINES]
     return bool(meaningful)
+
+
+def comparable_text(value: str) -> str:
+    return re.sub(r"[^\w]+", "", value, flags=re.UNICODE).casefold()
+
+
+def is_prompt_echo(candidate: str, prompt: str) -> bool:
+    return bool(candidate.strip()) and comparable_text(candidate) == comparable_text(prompt)
+
+
+def page_is_rate_limited(page: dict) -> bool:
+    text = str(page.get("page_text") or "").casefold()
+    return bool(page.get("rate_limited")) or any(marker.casefold() in text for marker in RATE_LIMIT_MARKERS)
+
+
+def is_incomplete_preamble(platform: str, answer: str) -> bool:
+    return platform == "chatgpt" and len(answer) < 300 and bool(PREAMBLE_PATTERN.match(answer))
 
 
 def answers_after_baseline(candidates: list[str], baseline: list[str]) -> list[str]:
@@ -249,18 +275,30 @@ class BskCliClient:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
+            if page_is_rate_limited(page):
+                return BrowserProbeOutput(
+                    failure=FailureKind.RATE_LIMITED,
+                    diagnostic="platform quota or rate limit detected",
+                )
             candidates = [str(value) for value in page.get("answers", [])]
             delta = answers_after_baseline(candidates, baseline)
+            delta = [candidate for candidate in delta if not is_prompt_echo(candidate, prompt)]
             saw_answer_candidate = saw_answer_candidate or bool(delta)
             current_text = select_main_answer(platform, delta)
             if not current_text:
+                continue
+            if is_incomplete_preamble(platform, current_text):
+                previous = current_text
+                stable_rounds = 0
                 continue
             lowered = current_text.casefold()
             if "429" in lowered or "rate limit" in lowered or "请求过于频繁" in current_text:
                 return BrowserProbeOutput(
                     failure=FailureKind.RATE_LIMITED, diagnostic="platform rate limit detected"
                 )
-            if current_text == previous:
+            if page.get("generating"):
+                stable_rounds = 0
+            elif current_text == previous:
                 stable_rounds += 1
                 if stable_rounds >= 2:
                     return BrowserProbeOutput(
@@ -329,6 +367,15 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "chatgpt":
+            try:
+                await self._run_json(
+                    "click", 'button[aria-label="发送"], button[aria-label="Send prompt"]',
+                    "--session", session_id, timeout=timeout
+                )
+                return
+            except RuntimeError:
+                pass
         if platform == "perplexity":
             try:
                 await self._run_json(
@@ -414,8 +461,13 @@ class BskCliClient:
         expression = (
             "(() => { const nodes = [...document.querySelectorAll("
             + json.dumps(selector)
-            + ")]; return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
-            "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))]}; })()"
+            + ")]; const bodyText = document.body ? (document.body.innerText || '') : ''; "
+            "const buttons = [...document.querySelectorAll('button')]; "
+            "return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
+            "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
+            "generating:buttons.some(b => /停止生成|Stop generating|Stop responding/i.test("
+            "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
+            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit/i.test(bodyText)}; })()"
         )
         result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
         value = self._result_value(result)

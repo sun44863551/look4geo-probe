@@ -213,14 +213,12 @@ async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_submits_using_stable_composer_selector():
+async def test_chatgpt_submits_using_native_send_button():
     client = FillFallbackClient()
     await client._submit_prompt("session", "chatgpt", "@e42")
-    assert client.calls[-1][:4] == (
-        "press",
-        "Enter",
-        "--selector",
-        'div[contenteditable="true"]',
+    assert client.calls[-1][:2] == (
+        "click",
+        'button[aria-label="发送"], button[aria-label="Send prompt"]',
     )
 
 
@@ -268,6 +266,85 @@ async def test_qwen_transient_controls_are_not_accepted_as_answers():
 
     assert output.failure in {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
     assert output.answer == ""
+
+
+@pytest.mark.asyncio
+async def test_grok_prompt_echo_is_ignored_until_real_answer_arrives():
+    prompt = "Which suppliers have stock?"
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": []},
+            {"answers": [prompt], "links": []},
+            {"answers": [prompt], "links": []},
+            {"answers": [prompt], "links": []},
+            {"answers": [prompt, "A real supplier answer with evidence."], "links": []},
+            {"answers": [prompt, "A real supplier answer with evidence."], "links": []},
+            {"answers": [prompt, "A real supplier answer with evidence."], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "grok", prompt, timeout=1)
+
+    assert output.answer == "A real supplier answer with evidence."
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_does_not_finish_while_generation_is_running():
+    preamble = "我会先核实生产商、库存与监管证据。"
+    complete = preamble + "\n完整答案：供应商 A 有公开库存证据，供应商 B 有监管备案。"
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "generating": False},
+            {"answers": [preamble], "links": [], "generating": True},
+            {"answers": [preamble], "links": [], "generating": True},
+            {"answers": [preamble], "links": [], "generating": True},
+            {"answers": [complete], "links": [], "generating": True},
+            {"answers": [complete], "links": [], "generating": False},
+            {"answers": [complete], "links": [], "generating": False},
+            {"answers": [complete], "links": [], "generating": False},
+        ]
+    )
+
+    output = await client.probe("session", "chatgpt", "请调查供应商", timeout=1)
+
+    assert output.answer == complete
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_short_preamble_is_not_success_without_generation_signal():
+    preamble = "I’ll first verify the suppliers and regulatory evidence."
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": []},
+            {"answers": [preamble], "links": []},
+            {"answers": [preamble], "links": []},
+            {"answers": [preamble], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "chatgpt", "Research suppliers", timeout=0.01)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert output.answer == ""
+
+
+@pytest.mark.asyncio
+async def test_perplexity_quota_wall_is_rate_limited_not_timeout():
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {
+                "answers": [],
+                "links": [],
+                "page_text": "您已达到免费搜索次数上限。你的使用权限将在几小时后重置。",
+            },
+        ]
+    )
+
+    output = await client.probe("session", "perplexity", "question", timeout=0.01)
+
+    assert output.failure == FailureKind.RATE_LIMITED
+    assert "quota" in (output.diagnostic or "")
 
 
 class FakeBrowserClient:

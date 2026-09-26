@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,17 @@ class ConcurrencyRecordingAdapter(ControlledAdapter):
         result = await super().run(platform, request)
         self.active -= 1
         return result
+
+
+class TimingAdapter(ControlledAdapter):
+    def __init__(self, platform):
+        super().__init__(platform)
+        self.entered_at = None
+
+    async def run(self, platform, request):
+        self.entered_at = datetime.now(timezone.utc)
+        await asyncio.sleep(0)
+        return await super().run(platform, request)
 
 
 @pytest.mark.asyncio
@@ -129,3 +141,20 @@ async def test_platforms_sharing_browser_runtime_run_serially(tmp_path: Path):
     await service.wait(submission["job_id"])
 
     assert adapter.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_service_records_finished_time_for_every_attempt(tmp_path: Path):
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    adapter = TimingAdapter("chatgpt")
+    service = ProbeService(
+        FixedRouter(["chatgpt"]), store, {"chatgpt": adapter}
+    )
+
+    submission = await service.run(ProbeRequest(prompt="timing"))
+    await service.wait(submission["job_id"])
+
+    attempt = service.result(submission["job_id"]).attempts[0]
+    assert attempt.started_at <= adapter.entered_at
+    assert attempt.finished_at is not None
+    assert attempt.finished_at >= adapter.entered_at
