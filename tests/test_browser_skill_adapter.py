@@ -12,7 +12,14 @@ from look4geo_probe.adapters.browser_skill import (
     select_main_answer,
     command_error_detail,
 )
-from look4geo_probe.models import FailureKind, JobStatus, ProbeRequest
+from look4geo_probe.models import (
+    FailureKind,
+    JobStatus,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRole,
+)
 
 
 def test_normalize_for_browser_preserves_original_and_records_changes():
@@ -175,6 +182,46 @@ class DelayedAnswerClient(BskCliClient):
         return self.last_page
 
 
+class SourceCollectorClient(BskCliClient):
+    def __init__(self, open_results, panel_pages=()):
+        super().__init__("browser", poll_interval=0)
+        self.open_results = iter(open_results)
+        self.panel_pages = iter(panel_pages)
+        self.last_panel_page = {"panel_found": True, "cards": []}
+        self.open_calls = 0
+
+    async def _open_source_panel(self, session_id, platform):
+        self.open_calls += 1
+        result = next(self.open_results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def _source_panel_page(self, session_id, platform):
+        try:
+            self.last_panel_page = next(self.panel_pages)
+        except StopIteration:
+            pass
+        return self.last_panel_page
+
+
+class SourceFailureProbeClient(DelayedAnswerClient):
+    async def _collect_visible_sources(self, session_id, platform, answer_links):
+        return [], SourceCaptureStatus.FAILED, "source panel blocked"
+
+
+def configure_source_panel(monkeypatch, platform="chatgpt"):
+    config = {
+        **PLATFORMS[platform],
+        "source_trigger_labels": ("Sources",),
+        "source_trigger_selectors": ('button[data-testid="sources"]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_card_selectors": ('a[data-testid="source-card"]',),
+        "excluded_source_domains": ("chatgpt.com",),
+    }
+    monkeypatch.setitem(PLATFORMS, platform, config)
+
+
 @pytest.mark.asyncio
 async def test_selector_only_composer_is_available_without_accessibility_ref():
     client = ComposerStateClient([True])
@@ -278,6 +325,138 @@ async def test_slow_spa_response_is_submitted_once_and_detected_by_answer_delta(
 
     assert client.submit_count == 1
     assert output.answer == "new complete answer"
+
+
+def test_browser_probe_output_defaults_to_no_exposed_sources():
+    output = BrowserProbeOutput(answer="complete")
+
+    assert output.sources == []
+    assert output.source_capture_status == SourceCaptureStatus.NONE_EXPOSED
+    assert output.source_capture_diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_answer_links_are_cited_answer_dom_sources(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session",
+        "chatgpt",
+        [{"url": "https://Example.com/spec?utm_source=chat", "title": "Spec"}],
+    )
+
+    assert len(sources) == 1
+    assert sources[0].url == "https://example.com/spec"
+    assert sources[0].source_role == SourceRole.CITED
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert sources[0].linked_in_answer is True
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_missing_source_trigger_without_answer_links_is_none_exposed(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "chatgpt", []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_source_trigger_that_cannot_open_is_failed_without_answer_loss(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": False, "diagnostic": "source panel blocked"}]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session",
+        "chatgpt",
+        [{"url": "https://example.com/cited", "title": "Cited"}],
+    )
+
+    assert [item.url for item in sources] == ["https://example.com/cited"]
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "source panel blocked"
+
+
+@pytest.mark.asyncio
+async def test_source_collection_failure_preserves_stable_answer():
+    client = SourceFailureProbeClient(
+        [
+            {"answers": [], "links": [], "answer_links": []},
+            {"answers": ["complete answer"], "links": [], "answer_links": []},
+            {"answers": ["complete answer"], "links": [], "answer_links": []},
+            {"answers": ["complete answer"], "links": [], "answer_links": []},
+        ]
+    )
+
+    output = await client.probe("session", "deepseek", "question", timeout=1)
+
+    assert output.answer == "complete answer"
+    assert output.failure is None
+    assert output.source_capture_status == SourceCaptureStatus.FAILED
+    assert output.source_capture_diagnostic == "source panel blocked"
+
+
+@pytest.mark.asyncio
+async def test_open_empty_source_panel_is_none_exposed(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}],
+        [
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://chatgpt.com/internal", "title": "Internal"}],
+            },
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://chatgpt.com/internal", "title": "Internal"}],
+            },
+        ],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "chatgpt", []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_stale_source_trigger_is_reobserved_only_once(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient(
+        [RuntimeError("stale element reference"), {"found": True, "opened": True}],
+        [
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://example.com/result", "title": "Result"}],
+            },
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://example.com/result", "title": "Result"}],
+            },
+        ],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "chatgpt", []
+    )
+
+    assert client.open_calls == 2
+    assert sources[0].source_role == SourceRole.SURFACED
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
 
 
 @pytest.mark.asyncio

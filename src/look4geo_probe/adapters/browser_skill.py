@@ -5,10 +5,22 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
-from ..models import Citation, FailureKind, JobStatus, PlatformAttempt, ProbeRequest
+from ..models import (
+    Citation,
+    FailureKind,
+    JobStatus,
+    PlatformAttempt,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRecord,
+    SourceRole,
+)
+from ..sources import merge_sources, normalize_source_url
 from ..validity import CONTAMINATION_RE
 
 PLATFORMS = {
@@ -78,6 +90,16 @@ PLATFORMS = {
         "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="response"], [class*="markdown"]',
     },
 }
+for _platform_config in PLATFORMS.values():
+    _platform_config.update(
+        {
+            "source_trigger_labels": (),
+            "source_trigger_selectors": (),
+            "source_panel_selectors": (),
+            "source_card_selectors": (),
+            "excluded_source_domains": (),
+        }
+    )
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
 TRANSIENT_ANSWER_LINES = {
@@ -128,6 +150,9 @@ def command_error_detail(stdout: bytes, stderr: bytes) -> str:
 class BrowserProbeOutput:
     answer: str = ""
     citations: list[str] = field(default_factory=list)
+    sources: list[SourceRecord] = field(default_factory=list)
+    source_capture_status: SourceCaptureStatus = SourceCaptureStatus.NONE_EXPOSED
+    source_capture_diagnostic: str | None = None
     login_required: bool = False
     failure: FailureKind | None = None
     diagnostic: str | None = None
@@ -335,14 +360,36 @@ class BskCliClient:
             elif current_text == previous:
                 stable_rounds += 1
                 if stable_rounds >= 2:
+                    answer_links = list(page.get("answer_links", []))
+                    if not answer_links:
+                        answer_links = [
+                            {"url": str(url), "title": None}
+                            for url in page.get("links", [])
+                        ]
+                    answer_links.extend(
+                        {"url": url, "title": None}
+                        for url in URL_PATTERN.findall(current_text)
+                    )
+                    try:
+                        sources, source_status, source_diagnostic = (
+                            await self._collect_visible_sources(
+                                session_id, platform, answer_links
+                            )
+                        )
+                    except Exception as error:
+                        sources = []
+                        source_status = SourceCaptureStatus.FAILED
+                        source_diagnostic = str(error)
                     return BrowserProbeOutput(
                         answer=current_text,
-                        citations=list(
-                            dict.fromkeys(
-                                [str(url) for url in page.get("links", [])]
-                                + URL_PATTERN.findall(current_text)
-                            )
-                        ),
+                        citations=[
+                            source.url
+                            for source in sources
+                            if source.source_role == SourceRole.CITED
+                        ],
+                        sources=sources,
+                        source_capture_status=source_status,
+                        source_capture_diagnostic=source_diagnostic,
                     )
             else:
                 stable_rounds = 0
@@ -507,6 +554,8 @@ class BskCliClient:
             + ")]; const bodyText = document.body ? (document.body.innerText || '') : ''; "
             "const buttons = [...document.querySelectorAll('button')]; "
             "return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
+            "answer_links:nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => "
+            "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
             "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
             "generating:buttons.some(b => /停止生成|Stop generating|Stop responding/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
@@ -515,6 +564,166 @@ class BskCliClient:
         result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
         value = self._result_value(result)
         return value if isinstance(value, dict) else {"answers": [], "links": []}
+
+    async def _collect_visible_sources(
+        self,
+        session_id: str,
+        platform: str,
+        answer_links: list[dict[str, str]],
+    ) -> tuple[list[SourceRecord], SourceCaptureStatus, str | None]:
+        config = PLATFORMS[platform]
+        excluded_domains = frozenset(config["excluded_source_domains"])
+        candidates: list[SourceRecord] = []
+        for link in answer_links:
+            record = self._source_record(
+                link,
+                role=SourceRole.CITED,
+                origin=SourceEvidenceOrigin.ANSWER_DOM,
+                excluded_domains=excluded_domains,
+            )
+            if record is not None:
+                candidates.append(record)
+
+        has_source_rule = bool(
+            config["source_trigger_labels"] or config["source_trigger_selectors"]
+        )
+        if not has_source_rule:
+            sources = merge_sources(candidates)
+            if sources:
+                return sources, SourceCaptureStatus.CAPTURED, None
+            return (
+                [],
+                SourceCaptureStatus.UNSUPPORTED,
+                f"visible source panel is not configured for {platform}",
+            )
+
+        open_state: dict | None = None
+        open_error: Exception | None = None
+        for _ in range(2):
+            try:
+                open_state = await self._open_source_panel(session_id, platform)
+                open_error = None
+                break
+            except Exception as error:
+                open_error = error
+        if open_error is not None:
+            return merge_sources(candidates), SourceCaptureStatus.FAILED, str(open_error)
+        if not isinstance(open_state, dict) or not open_state.get("found"):
+            sources = merge_sources(candidates)
+            status = (
+                SourceCaptureStatus.CAPTURED
+                if sources
+                else SourceCaptureStatus.NONE_EXPOSED
+            )
+            return sources, status, None
+        if not open_state.get("opened"):
+            return (
+                merge_sources(candidates),
+                SourceCaptureStatus.FAILED,
+                str(open_state.get("diagnostic") or "source panel could not be opened"),
+            )
+
+        previous_cards: list[dict] | None = None
+        stable_cards: list[dict] = []
+        for _ in range(4):
+            panel_page = await self._source_panel_page(session_id, platform)
+            cards = list(panel_page.get("cards", [])) if isinstance(panel_page, dict) else []
+            if previous_cards is not None and cards == previous_cards:
+                stable_cards = cards
+                break
+            previous_cards = cards
+            stable_cards = cards
+            await asyncio.sleep(self.poll_interval)
+
+        for card in stable_cards:
+            record = self._source_record(
+                card,
+                role=SourceRole.SURFACED,
+                origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                excluded_domains=excluded_domains,
+            )
+            if record is not None:
+                candidates.append(record)
+        sources = merge_sources(candidates)
+        status = (
+            SourceCaptureStatus.CAPTURED
+            if sources
+            else SourceCaptureStatus.NONE_EXPOSED
+        )
+        return sources, status, None
+
+    @staticmethod
+    def _source_record(
+        candidate: dict,
+        *,
+        role: SourceRole,
+        origin: SourceEvidenceOrigin,
+        excluded_domains: frozenset[str],
+    ) -> SourceRecord | None:
+        normalized_url = normalize_source_url(
+            str(candidate.get("url") or ""), excluded_domains=excluded_domains
+        )
+        if normalized_url is None:
+            return None
+        return SourceRecord(
+            url=normalized_url,
+            title=str(candidate.get("title") or "").strip() or None,
+            domain=urlsplit(normalized_url).hostname or "",
+            snippet=str(candidate.get("snippet") or "").strip() or None,
+            source_role=role,
+            evidence_origin=origin,
+            linked_in_answer=role == SourceRole.CITED,
+        )
+
+    async def _open_source_panel(self, session_id: str, platform: str) -> dict:
+        config = PLATFORMS[platform]
+        expression = (
+            "(() => { const selectors = "
+            + json.dumps(list(config["source_trigger_selectors"]))
+            + "; const labels = "
+            + json.dumps(list(config["source_trigger_labels"]), ensure_ascii=False)
+            + "; const answerSelector = "
+            + json.dumps(config["answer_selector"])
+            + "; const answers = [...document.querySelectorAll(answerSelector)]; "
+            "const root = answers.at(-1) || document; let trigger = null; "
+            "for (const selector of selectors) { trigger = root.querySelector(selector) || "
+            "document.querySelector(selector); if (trigger) break; } "
+            "if (!trigger && labels.length) { const controls = [...root.querySelectorAll("
+            "'button,[role=button],a')]; trigger = controls.find(node => { const text = "
+            "((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim(); "
+            "return labels.some(label => text.includes(label)); }); } "
+            "if (!trigger) return {found:false,opened:false}; "
+            "try { trigger.click(); return {found:true,opened:true}; } "
+            "catch (error) { return {found:true,opened:false,diagnostic:String(error)}; } })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        value = self._result_value(result)
+        return value if isinstance(value, dict) else {"found": False, "opened": False}
+
+    async def _source_panel_page(self, session_id: str, platform: str) -> dict:
+        config = PLATFORMS[platform]
+        expression = (
+            "(() => { const panelSelectors = "
+            + json.dumps(list(config["source_panel_selectors"]))
+            + "; const cardSelectors = "
+            + json.dumps(list(config["source_card_selectors"]))
+            + "; const panels = panelSelectors.flatMap(selector => "
+            "[...document.querySelectorAll(selector)]); if (!panels.length) "
+            "return {panel_found:false,cards:[]}; const cards = panels.flatMap(panel => "
+            "cardSelectors.flatMap(selector => [...panel.querySelectorAll(selector)])); "
+            "return {panel_found:true,cards:cards.map(card => { const anchor = "
+            "card.matches('a[href]') ? card : card.querySelector('a[href]'); return {"
+            "url:anchor ? anchor.href : '', title:((card.querySelector('h1,h2,h3,h4,[role=heading]')"
+            " || anchor || card).innerText || '').trim() || null, snippet:(card.innerText || '')"
+            ".trim() || null}; })}; })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        value = self._result_value(result)
+        return value if isinstance(value, dict) else {"panel_found": False, "cards": []}
 
     @staticmethod
     def _result_value(result):
