@@ -22,7 +22,7 @@ from ..models import (
 from ..sources import citations_from_sources, merge_sources, normalize_source_url
 from ..validity import answer_is_valid_measurement
 
-SUPPORTED_PLATFORMS = {"doubao", "yuanbao", "qwen", "gemini", "grok"}
+SUPPORTED_PLATFORMS = {"doubao", "yuanbao", "gemini", "grok"}
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
 
 
@@ -106,11 +106,7 @@ class AIHubAdapter(ProbeAdapter):
             "--output",
             str(output),
         ]
-        timeout = float(
-            request.options.get(
-                "timeout", 120.0 if platform == "qwen" else self.default_timeout
-            )
-        )
+        timeout = float(request.options.get("timeout", self.default_timeout))
         try:
             result = await self.runner.run(command, timeout)
         except asyncio.TimeoutError:

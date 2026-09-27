@@ -93,8 +93,8 @@ async def test_adapter_chain_preserves_final_timeout_failure_kind():
         "ai_search_hub", JobStatus.FAILED, failure=FailureKind.TIMEOUT
     )
 
-    result = await AdapterChain("qwen", [primary, fallback]).run(
-        "qwen", ProbeRequest(prompt="hello")
+    result = await AdapterChain("gemini", [primary, fallback]).run(
+        "gemini", ProbeRequest(prompt="hello")
     )
 
     assert result.status == JobStatus.FAILED
@@ -132,10 +132,10 @@ async def test_adapter_chain_hard_timeout_falls_back_and_classifies_timeout():
     primary = SlowAdapter("browser_skill", JobStatus.SUCCEEDED)
     fallback = ResultAdapter("ai_search_hub", JobStatus.SUCCEEDED)
     chain = AdapterChain(
-        "qwen", [primary, fallback], attempt_timeouts=[0.01, 0.1]
+        "gemini", [primary, fallback], attempt_timeouts=[0.01, 0.1]
     )
 
-    result = await chain.run("qwen", ProbeRequest(prompt="hello"))
+    result = await chain.run("gemini", ProbeRequest(prompt="hello"))
 
     assert result.status == JobStatus.SUCCEEDED
     assert result.adapter == "ai_search_hub"

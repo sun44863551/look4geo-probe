@@ -19,19 +19,14 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         artifact_root=root / "data/runs",
     )
     del runtime  # Both callers intentionally use one machine-local adapter policy.
-    fallback_platforms = {"doubao", "yuanbao", "qwen", "gemini", "grok"}
+    fallback_platforms = {"doubao", "yuanbao", "gemini", "grok"}
     return {
         platform: AdapterChain(
             platform,
             [browser, ai_hub] if platform in fallback_platforms else [browser],
-            attempt_timeouts=(
-                [105.0, 130.0]
-                if platform == "qwen"
-                else None
-            ),
         )
         for platform in (
-            "doubao", "deepseek", "yuanbao", "qwen",
+            "doubao", "deepseek", "yuanbao", "baidu",
             "chatgpt", "gemini", "perplexity", "grok",
         )
     }

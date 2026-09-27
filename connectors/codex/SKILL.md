@@ -23,6 +23,10 @@ For several named platforms, repeat `--platform`, for example:
 
 The optional local `look4geo-probe` MCP tools expose the same service and result schema.
 
+Active platform IDs are `doubao`, `deepseek`, `yuanbao`, `baidu`, `chatgpt`,
+`gemini`, `perplexity`, and `grok`. Baidu uses the same unified CLI/MCP tool;
+there is no separate Baidu tool. Qwen is not an active platform.
+
 - Default to `probe_run` with `mode: auto`; use `compare` for cross-market comparison, `all` only when explicitly requested, and `manual` when platforms are named.
 - Report the selected platforms and routing reasons.
 - `probe_run` returns a job ID. Poll `probe_status`, then call `probe_result` only after a terminal state.

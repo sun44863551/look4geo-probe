@@ -35,7 +35,7 @@ async def test_ai_hub_returns_saved_answer_and_uses_argument_array(tmp_path: Pat
     adapter = AIHubAdapter(tmp_path, runner=runner, python_executable="python-test")
 
     attempt = await adapter.run(
-        "qwen", ProbeRequest(prompt="测试问题", options={"output": str(output)})
+        "gemini", ProbeRequest(prompt="测试问题", options={"output": str(output)})
     )
 
     assert attempt.status == JobStatus.SUCCEEDED
@@ -85,7 +85,7 @@ async def test_ai_hub_answer_without_urls_is_none_exposed(tmp_path: Path):
     adapter = AIHubAdapter(tmp_path, runner=runner)
 
     attempt = await adapter.run(
-        "qwen", ProbeRequest(prompt="测试问题", options={"output": str(output)})
+        "gemini", ProbeRequest(prompt="测试问题", options={"output": str(output)})
     )
 
     assert attempt.status == JobStatus.SUCCEEDED
@@ -103,7 +103,7 @@ async def test_ai_hub_rejects_landing_page_placeholder_as_success(tmp_path: Path
     )
 
     attempt = await adapter.run(
-        "qwen", ProbeRequest(prompt="请查找供应商", options={"output": str(output)})
+        "gemini", ProbeRequest(prompt="请查找供应商", options={"output": str(output)})
     )
 
     assert attempt.status == JobStatus.FAILED
@@ -112,14 +112,14 @@ async def test_ai_hub_rejects_landing_page_placeholder_as_success(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_ai_hub_qwen_uses_bounded_default_timeout(tmp_path: Path):
+async def test_ai_hub_uses_configured_default_timeout(tmp_path: Path):
     output = tmp_path / "answer.txt"
     output.write_text("这是一个足够长且有效的完整回答内容，用于验证默认超时时间。", encoding="utf-8")
     runner = FakeRunner(CommandResult(0, "done", ""))
     adapter = AIHubAdapter(tmp_path, runner=runner, default_timeout=180)
 
     await adapter.run(
-        "qwen", ProbeRequest(prompt="测试问题", options={"output": str(output)})
+        "gemini", ProbeRequest(prompt="测试问题", options={"output": str(output)})
     )
 
-    assert runner.commands[0][1] == 120
+    assert runner.commands[0][1] == 180

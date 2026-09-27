@@ -24,6 +24,10 @@ must not copy the implementation into a public WorkBuddy skill area. Manual
 platform selection remains `--mode manual` with one or more repeated
 `--platform <name>` flags.
 
+Active platform IDs are `doubao`, `deepseek`, `yuanbao`, `baidu`, `chatgpt`,
+`gemini`, `perplexity`, and `grok`. Baidu remains inside this same unified
+local tool; Qwen is no longer an active platform.
+
 Results keep answer status separate from source capture. `captured` means at
 least one visibly exposed source was collected, `none_exposed` means the UI
 showed none, and `failed` carries a `source_capture_diagnostic` without turning

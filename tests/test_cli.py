@@ -20,7 +20,7 @@ class FakeService:
 
     async def run(self, request):
         self.last_request = request
-        return {"job_id": "job-1", "selected_platforms": ["qwen"], "reasons": {}, "status": JobStatus.RUNNING}
+        return {"job_id": "job-1", "selected_platforms": ["baidu"], "reasons": {}, "status": JobStatus.RUNNING}
 
     async def wait(self, job_id):
         return None
@@ -32,7 +32,7 @@ class FakeService:
             status=JobStatus.SUCCEEDED,
             attempts=[
                 PlatformAttempt(
-                    platform="qwen",
+                    platform="baidu",
                     adapter="browser_skill",
                     status=JobStatus.SUCCEEDED,
                     raw_answer="answer",
@@ -55,7 +55,7 @@ class FakeService:
         return type("Job", (), {"job_id": job_id, "status": JobStatus.RUNNING, "diagnostic": None})()
 
     async def platforms(self):
-        return {"qwen": {"available": True, "adapter": "ai_search_hub"}}
+        return {"baidu": {"available": True, "adapter": "browser_skill"}}
 
     async def login(self, platform):
         return {"platform": platform, "status": "user_action_required"}
@@ -76,7 +76,7 @@ def test_cli_run_waits_and_prints_result_json():
 def test_cli_platforms_uses_same_service_interface():
     result = CliRunner().invoke(app, ["platforms", "--json"])
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["qwen"]["available"] is True
+    assert json.loads(result.stdout)["baidu"]["available"] is True
 
 
 def test_cli_run_accepts_repeat_count():
@@ -92,11 +92,11 @@ def test_cli_manual_platform_flags_are_unchanged():
     set_service_factory(lambda: service)
     result = CliRunner().invoke(
         app,
-        ["run", "hello", "--mode", "manual", "--platform", "qwen", "--json"],
+        ["run", "hello", "--mode", "manual", "--platform", "baidu", "--json"],
     )
     assert result.exit_code == 0
     assert service.last_request.mode.value == "manual"
-    assert service.last_request.platforms == ["qwen"]
+    assert service.last_request.platforms == ["baidu"]
 
 
 def test_cli_json_keeps_answer_and_source_capture_status_separate():

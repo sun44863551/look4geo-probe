@@ -90,10 +90,10 @@ async def test_run_returns_job_before_adapter_completes(tmp_path: Path):
 async def test_partial_success_preserves_successful_attempt(tmp_path: Path):
     store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
     service = ProbeService(
-        FixedRouter(["qwen", "gemini"]),
+        FixedRouter(["baidu", "gemini"]),
         store,
         {
-            "qwen": ControlledAdapter("qwen"),
+            "baidu": ControlledAdapter("baidu"),
             "gemini": ControlledAdapter("gemini", status=JobStatus.FAILED),
         },
     )
@@ -101,7 +101,7 @@ async def test_partial_success_preserves_successful_attempt(tmp_path: Path):
     await service.wait(submission["job_id"])
     result = service.result(submission["job_id"])
     assert result.status == JobStatus.PARTIAL
-    assert [a.platform for a in result.attempts if a.status == JobStatus.SUCCEEDED] == ["qwen"]
+    assert [a.platform for a in result.attempts if a.status == JobStatus.SUCCEEDED] == ["baidu"]
 
 
 @pytest.mark.asyncio
@@ -133,9 +133,9 @@ async def test_platforms_sharing_browser_runtime_run_serially(tmp_path: Path):
     store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
     adapter = ConcurrencyRecordingAdapter("shared-browser")
     service = ProbeService(
-        FixedRouter(["qwen", "gemini"]),
+        FixedRouter(["baidu", "gemini"]),
         store,
-        {"qwen": adapter, "gemini": adapter},
+        {"baidu": adapter, "gemini": adapter},
     )
 
     submission = await service.run(ProbeRequest(prompt="compare", repeats=2))

@@ -39,7 +39,7 @@ def test_browser_skill_defines_every_probe_platform():
         "doubao",
         "deepseek",
         "yuanbao",
-        "qwen",
+        "baidu",
         "chatgpt",
         "gemini",
         "perplexity",
@@ -53,16 +53,6 @@ def test_perplexity_selects_longest_answer_not_follow_up():
         ["Short follow-up?", "This is the complete researched answer with suppliers and evidence."],
     )
     assert answer == "This is the complete researched answer with suppliers and evidence."
-
-
-def test_qwen_selects_full_answer_not_nested_tail_fragment():
-    full_answer = "完整回答：" + ("供应商、纯度、MOQ、出口文件与来源。" * 20)
-    answer = select_main_answer(
-        "qwen",
-        [full_answer, "供应商、纯度、MOQ。", "采购前请再次核验。"],
-    )
-
-    assert answer == full_answer
 
 
 def test_yuanbao_selects_full_answer_not_nested_source_url():
@@ -122,11 +112,13 @@ def test_textbox_lookup_accepts_current_chatgpt_label():
     ) == "@e17"
 
 
-def test_textbox_lookup_accepts_current_qwen_label():
-    page = '@e17 textbox "询问 Qwen" [empty]'
-    assert BskCliClient._find_textbox_ref(
-        page, PLATFORMS["qwen"]["textbox"]
-    ) == "@e17"
+def test_baidu_uses_current_official_entry_and_stable_dom_boundaries():
+    config = PLATFORMS["baidu"]
+
+    assert config["url"] == "https://chat.baidu.com/"
+    assert config["composer_selector"] == "textarea.ci-textarea"
+    assert config["answer_selector"] == ".chat-search-answer-generate"
+    assert config["conversation_marker"] == "/search/"
 
 
 def test_textbox_lookup_accepts_current_gemini_label():
@@ -313,6 +305,17 @@ async def test_doubao_dismisses_download_promotion_before_observing():
 
 
 @pytest.mark.asyncio
+async def test_baidu_dismisses_task_mode_promotion_before_observing():
+    client = FillFallbackClient()
+
+    dismissed = await client._dismiss_blocking_overlays("session", "baidu")
+
+    assert dismissed is True
+    assert client.calls[-1][0] == "evaluate"
+    assert "全新上线任务模式" in client.calls[-1][1]
+
+
+@pytest.mark.asyncio
 async def test_doubao_post_submit_login_dialog_is_not_reported_as_timeout():
     client = DoubaoPostSubmitLoginClient(
         [
@@ -366,18 +369,6 @@ async def test_chatgpt_submits_using_native_send_button():
     assert client.calls[-1][:2] == (
         "click",
         'button[aria-label="发送"], button[aria-label="Send prompt"]',
-    )
-
-
-@pytest.mark.asyncio
-async def test_qwen_submits_using_native_send_button():
-    client = FillFallbackClient()
-
-    await client._submit_prompt("session", "qwen", "@e17")
-
-    assert client.calls[-1][:2] == (
-        "click",
-        'button[aria-label="发送"], button[aria-label="Send"]',
     )
 
 
@@ -543,7 +534,7 @@ async def test_stale_source_trigger_is_reobserved_only_once(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "qwen"])
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "baidu"])
 async def test_domestic_platforms_collect_cited_and_surfaced_fixture_sources(platform):
     fixture = load_source_fixture(platform)
     panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
@@ -569,7 +560,7 @@ async def test_domestic_platforms_collect_cited_and_surfaced_fixture_sources(pla
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "qwen"])
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "baidu"])
 async def test_domestic_platforms_report_none_exposed_when_trigger_is_absent(platform):
     client = SourceCollectorClient([{"found": False, "opened": False}])
 
@@ -583,7 +574,7 @@ async def test_domestic_platforms_report_none_exposed_when_trigger_is_absent(pla
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "qwen"])
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "baidu"])
 async def test_domestic_platforms_keep_citations_when_panel_open_fails(platform):
     fixture = load_source_fixture(platform)
     client = SourceCollectorClient(
@@ -676,7 +667,7 @@ def test_perplexity_links_stay_scoped_to_selected_longest_answer():
 
 
 @pytest.mark.asyncio
-async def test_qwen_transient_controls_are_not_accepted_as_answers():
+async def test_baidu_transient_controls_are_not_accepted_as_answers():
     client = DelayedAnswerClient(
         [
             {"answers": [], "links": []},
@@ -686,7 +677,7 @@ async def test_qwen_transient_controls_are_not_accepted_as_answers():
         ]
     )
 
-    output = await client.probe("session", "qwen", "question", timeout=0.01)
+    output = await client.probe("session", "baidu", "question", timeout=0.01)
 
     assert output.failure in {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
     assert output.answer == ""
@@ -700,7 +691,7 @@ async def test_qwen_transient_controls_are_not_accepted_as_answers():
         "通过验证以确保正常访问。\n请拖动下方滑块完成验证。",
     ],
 )
-async def test_qwen_human_verification_returns_user_action_required(challenge_text):
+async def test_baidu_human_verification_returns_user_action_required(challenge_text):
     client = DelayedAnswerClient(
         [
             {"answers": [], "links": [], "page_text": ""},
@@ -708,7 +699,7 @@ async def test_qwen_human_verification_returns_user_action_required(challenge_te
         ]
     )
 
-    output = await client.probe("session", "qwen", "question", timeout=1)
+    output = await client.probe("session", "baidu", "question", timeout=1)
 
     assert output.login_required is True
     assert output.diagnostic == "human verification required"
@@ -893,23 +884,11 @@ async def test_browser_adapter_returns_answer_and_stops_session(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_qwen_uses_shorter_bounded_default_timeout(tmp_path: Path):
-    client = FakeBrowserClient(BrowserProbeOutput(answer="完整回答"))
-    adapter = BrowserSkillAdapter(
-        client=client, artifact_root=tmp_path, default_timeout=180
-    )
-
-    await adapter.run("qwen", ProbeRequest(prompt="测试"))
-
-    assert client.last_timeout == 90
-
-
-@pytest.mark.asyncio
-async def test_explicit_timeout_overrides_qwen_default(tmp_path: Path):
+async def test_explicit_timeout_overrides_baidu_default(tmp_path: Path):
     client = FakeBrowserClient(BrowserProbeOutput(answer="完整回答"))
     adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
 
-    await adapter.run("qwen", ProbeRequest(prompt="测试", options={"timeout": 12}))
+    await adapter.run("baidu", ProbeRequest(prompt="测试", options={"timeout": 12}))
 
     assert client.last_timeout == 12
 
@@ -952,7 +931,7 @@ async def test_browser_adapter_preserves_human_verification_diagnostic(tmp_path:
     )
     adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
 
-    attempt = await adapter.run("qwen", ProbeRequest(prompt="测试"))
+    attempt = await adapter.run("baidu", ProbeRequest(prompt="测试"))
 
     assert attempt.status == JobStatus.WAITING_FOR_LOGIN
     assert attempt.failure == FailureKind.LOGIN_REQUIRED

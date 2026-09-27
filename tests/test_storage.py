@@ -47,7 +47,7 @@ def test_recover_orphaned_running_job_preserves_artifacts(tmp_path):
 
 def test_request_round_trip_preserves_mode_and_platforms(tmp_path):
     store = make_store(tmp_path)
-    original = ProbeRequest(prompt="question", mode="manual", platforms=["qwen"])
+    original = ProbeRequest(prompt="question", mode="manual", platforms=["baidu"])
     job = store.create_job(original)
     assert store.get_job(job.job_id).request == original
 

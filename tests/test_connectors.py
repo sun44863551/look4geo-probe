@@ -50,7 +50,7 @@ def test_codex_and_workbuddy_use_same_adapter_policy(tmp_path, monkeypatch):
     default = build_adapters(tmp_path, runtime="default")
 
     assert set(workbuddy) == {
-        "doubao", "deepseek", "yuanbao", "qwen",
+        "doubao", "deepseek", "yuanbao", "baidu",
         "chatgpt", "gemini", "perplexity", "grok",
     }
     assert {
@@ -68,7 +68,8 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
     assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
-    assert adapters["qwen"].attempt_timeouts == [105.0, 130.0]
+    assert adapters["baidu"].adapter_names == ["browser_skill"]
+    assert "qwen" not in adapters
 
 
 def test_local_connector_instructions_preserve_private_cli_contract():

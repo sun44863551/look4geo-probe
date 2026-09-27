@@ -66,13 +66,13 @@ PLATFORMS = {
         "conversation_marker": "/chat/",
         "answer_selector": '[data-role="assistant"], [class*="assistant"], [class*="markdown"], [class*="answer"]',
     },
-    "qwen": {
-        "url": "https://chat.qwen.ai/",
-        "textbox": ("询问 Qwen", "输入消息", "How can I help you today?", "Ask anything"),
-        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
-        "login_markers": ("登录", "Sign in", "Continue with Google"),
-        "conversation_marker": "/c/",
-        "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="markdown"], article',
+    "baidu": {
+        "url": "https://chat.baidu.com/",
+        "textbox": (),
+        "composer_selector": "textarea.ci-textarea",
+        "login_markers": ("请登录", "登录同步历史对话"),
+        "conversation_marker": "/search/",
+        "answer_selector": ".chat-search-answer-generate",
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
@@ -145,17 +145,12 @@ PLATFORMS["yuanbao"].update(
         "excluded_source_domains": ("yuanbao.tencent.com",),
     }
 )
-PLATFORMS["qwen"].update(
+PLATFORMS["baidu"].update(
     {
-        "source_trigger_labels": ("Sources", "来源", "网页"),
-        "source_trigger_selectors": (
-            'button[aria-label*="source" i]',
-            'button[aria-label*="来源"]',
-        ),
-        "source_panel_selectors": ('[role="dialog"]',),
-        "source_panel_labels": ("Sources", "来源"),
+        "source_trigger_labels": ("来源", "参考资料"),
+        "source_panel_labels": ("来源", "参考资料"),
         "source_card_selectors": ("a[href]",),
-        "excluded_source_domains": ("qwen.ai",),
+        "excluded_source_domains": ("wenxin.baidu.com", "chat.baidu.com"),
     }
 )
 PLATFORMS["chatgpt"].update(
@@ -296,7 +291,7 @@ def select_main_answer(platform: str, candidates: list[str]) -> str:
     usable = [candidate.strip() for candidate in candidates if is_valid_answer(candidate)]
     if not usable:
         return ""
-    if platform in {"perplexity", "qwen", "yuanbao"}:
+    if platform in {"perplexity", "yuanbao"}:
         return max(usable, key=len)
     return usable[-1]
 
@@ -571,14 +566,16 @@ class BskCliClient:
         await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
 
     async def _dismiss_blocking_overlays(self, session_id: str, platform: str) -> bool:
-        if platform != "doubao":
+        if platform not in {"doubao", "baidu"}:
             return False
+        marker = "下载豆包电脑版" if platform == "doubao" else "全新上线任务模式"
         expression = (
-            "(() => { const dialogs = [...document.querySelectorAll('[role=dialog]')]; "
-            "const promo = dialogs.find(node => (node.innerText || '').includes('下载豆包电脑版')); "
+            "(() => { const marker = " + json.dumps(marker, ensure_ascii=False) + "; "
+            "const candidates = [...document.querySelectorAll('[role=dialog],body > div')]; "
+            "const promo = candidates.find(node => (node.innerText || '').includes(marker)); "
             "if (!promo) return false; const controls = [...promo.querySelectorAll('button')]; "
             "const close = controls.find(node => /^(关闭|close)$/i.test(((node.getAttribute('aria-label') "
-            "|| '') + ' ' + (node.innerText || '')).trim())); if (!close) return false; "
+            "|| '') + ' ' + (node.innerText || '')).trim())) || controls[0]; if (!close) return false; "
             "close.click(); return true; })()"
         )
         result = await self._run_json(
@@ -594,15 +591,6 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
-        if platform == "qwen":
-            try:
-                await self._run_json(
-                    "click", 'button[aria-label="发送"], button[aria-label="Send"]',
-                    "--session", session_id, timeout=timeout
-                )
-                return
-            except RuntimeError:
-                pass
         if platform == "chatgpt":
             try:
                 await self._run_json(
@@ -949,7 +937,7 @@ class BrowserSkillAdapter(ProbeAdapter):
                 normalized.sent,
                 float(
                     request.options.get(
-                        "timeout", 90.0 if platform == "qwen" else self.default_timeout
+                        "timeout", self.default_timeout
                     )
                 ),
             )

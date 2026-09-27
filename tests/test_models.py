@@ -27,9 +27,9 @@ def test_manual_mode_requires_platforms():
 
 def test_manual_mode_deduplicates_platforms_preserving_order():
     request = ProbeRequest(
-        prompt="test", mode=RouteMode.MANUAL, platforms=["qwen", "qwen", "chatgpt"]
+        prompt="test", mode=RouteMode.MANUAL, platforms=["baidu", "baidu", "chatgpt"]
     )
-    assert request.platforms == ["qwen", "chatgpt"]
+    assert request.platforms == ["baidu", "chatgpt"]
 
 
 def test_new_results_use_schema_version_three():
