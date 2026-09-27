@@ -91,3 +91,13 @@ def test_local_connector_instructions_preserve_private_cli_contract():
 
     assert "public" in readme.casefold()
     assert "must not be uploaded" in readme
+
+
+def test_ai_search_hub_is_a_pinned_submodule_initialized_by_bootstrap():
+    gitmodules = (ROOT / ".gitmodules").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts/bootstrap.sh").read_text(encoding="utf-8")
+
+    assert "vendor/AI-Search-Hub" in gitmodules
+    assert "https://github.com/minsight-ai-info/AI-Search-Hub.git" in gitmodules
+    assert "git submodule update --init --recursive vendor/AI-Search-Hub" in bootstrap
+    assert "git clone https://github.com/minsight-ai-info/AI-Search-Hub.git" not in bootstrap

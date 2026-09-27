@@ -32,6 +32,20 @@ def test_measurement_success_rejects_short_preamble_and_contamination():
     assert result_is_clean_success(contaminated, expected_repeats=1, min_answer_chars=20) is False
 
 
+def test_measurement_success_rejects_gemini_landing_page_greetings():
+    for greeting in (
+        "The mic is yours, sun",
+        "Let's jump in, sun",
+        "What's the vibe, sun?",
+        "Ask away, sun!",
+        "What should we focus on?",
+    ):
+        payload = result("research", [succeeded(greeting)])
+        assert result_is_clean_success(
+            payload, expected_repeats=1, min_answer_chars=20
+        ) is False
+
+
 def test_measurement_success_requires_every_repeat_to_have_real_answer():
     payload = result(
         "research",

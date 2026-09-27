@@ -82,10 +82,14 @@ PLATFORMS = {
             "Enter a prompt for Gemini",
             "向 Gemini 提问",
         ),
-        "composer_selector": 'rich-textarea textarea, textarea, div[role="textbox"], div[contenteditable="true"]',
+        "composer_selector": (
+            'div[aria-label="Enter a prompt for Gemini"], '
+            'rich-textarea [contenteditable="true"][role="textbox"], '
+            'div[contenteditable="true"][role="textbox"][aria-multiline="true"]'
+        ),
         "login_markers": ("登录", "Sign in", "Continue with Google"),
         "conversation_marker": "/app/",
-        "answer_selector": "model-response-content message-content",
+        "answer_selector": "message-content .markdown",
     },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
@@ -195,6 +199,7 @@ PLATFORMS["grok"].update(
     }
 )
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
+BUTTON_REF_PATTERN = re.compile(r"(@e\d+)\s+button\s+\"([^\"]+)\"")
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}\u200b\u2060]+")
 
 
@@ -230,6 +235,8 @@ HUMAN_VERIFICATION_MARKERS = (
     "你出生于哪一年",
     "通过验证以确保正常访问",
     "请拖动下方滑块完成验证",
+    "Our systems have detected unusual traffic from your computer network",
+    "我们的系统检测到您的计算机网络中存在异常流量",
 )
 PREAMBLE_PATTERN = re.compile(
     r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
@@ -542,7 +549,12 @@ class BskCliClient:
                 )
                 return
             except RuntimeError:
-                pass
+                if platform == "gemini":
+                    value = await self._composer_text(
+                        session_id, PLATFORMS[platform]["composer_selector"]
+                    )
+                    if value.strip() == prompt.strip():
+                        return
 
         selector = PLATFORMS[platform]["composer_selector"]
         await self._run_json("click", selector, "--session", session_id, timeout=timeout)
@@ -591,6 +603,36 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "gemini":
+            state_expression = (
+                "(() => { const composer = document.querySelector(" +
+                json.dumps(PLATFORMS["gemini"]["composer_selector"]) +
+                "); const text = composer ? (composer.innerText || composer.textContent || "") : ""; "
+                "const stop = [...document.querySelectorAll('button')].some(button => "
+                "/stop/i.test((button.getAttribute('aria-label') || '') + ' ' + "
+                "(button.innerText || ''))); const conversation = /^\\/app\\/.+/.test(location.pathname); "
+                "return {submitted: stop || conversation || !text.trim()}; })()"
+            )
+            for _ in range(3):
+                observation = await self._run_json(
+                    "observe", "--session", session_id, timeout=timeout
+                )
+                send_ref = self._find_button_ref(
+                    str(observation.get("text", "")) if isinstance(observation, dict) else "",
+                    ("Send message", "发送消息"),
+                )
+                await self._run_json(
+                    "click", send_ref or 'button[aria-label*="Send" i]',
+                    "--session", session_id, timeout=timeout
+                )
+                await asyncio.sleep(self.poll_interval)
+                result = await self._run_json(
+                    "evaluate", state_expression, "--session", session_id, timeout=timeout
+                )
+                state = self._result_value(result)
+                if state is True or (isinstance(state, dict) and state.get("submitted")):
+                    return
+            raise RuntimeError("Gemini submission state did not change after 3 attempts")
         if platform == "chatgpt":
             try:
                 await self._run_json(
@@ -897,6 +939,13 @@ class BskCliClient:
         expected = (expected_label,) if isinstance(expected_label, str) else expected_label
         for ref, label in REF_PATTERN.findall(page_text):
             if label in expected:
+                return ref
+        return None
+
+    @staticmethod
+    def _find_button_ref(page_text: str, expected_labels: tuple[str, ...]) -> str | None:
+        for ref, label in BUTTON_REF_PATTERN.findall(page_text):
+            if label in expected_labels:
                 return ref
         return None
 

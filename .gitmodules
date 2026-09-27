@@ -1,0 +1,3 @@
+[submodule "vendor/AI-Search-Hub"]
+	path = vendor/AI-Search-Hub
+	url = https://github.com/minsight-ai-info/AI-Search-Hub.git

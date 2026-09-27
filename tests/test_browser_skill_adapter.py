@@ -152,6 +152,11 @@ class FillFallbackClient(BskCliClient):
         return {"value": True}
 
 
+class GeminiFilledDespiteErrorClient(FillFallbackClient):
+    async def _composer_text(self, session_id, selector):
+        return "hello"
+
+
 class ComposerStateClient(BskCliClient):
     def __init__(self, values):
         super().__init__("browser", poll_interval=0)
@@ -161,6 +166,35 @@ class ComposerStateClient(BskCliClient):
     async def _run_json(self, *args, timeout=30.0):
         self.calls.append(args)
         return {"value": next(self.values)}
+
+
+class GeminiSubmitClient(BskCliClient):
+    def __init__(self, states):
+        super().__init__("browser", poll_interval=0)
+        self.states = iter(states)
+        self.clicks = 0
+
+    async def _run_json(self, *args, timeout=30.0):
+        if args[0] == "click":
+            self.clicks += 1
+            return {"value": True}
+        if args[0] == "evaluate":
+            return {"value": next(self.states)}
+        return {"value": True}
+
+
+class GeminiObservedSubmitClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "observe":
+            return {"text": '@e52 button "Send message"'}
+        if args[0] == "evaluate":
+            return {"value": {"submitted": True}}
+        return {"value": True}
 
 
 class LoginOverlayClient(BskCliClient):
@@ -340,7 +374,12 @@ def test_doubao_answer_boundary_targets_message_content():
 
 
 def test_gemini_answer_boundary_excludes_prompt_and_navigation():
-    assert PLATFORMS["gemini"]["answer_selector"] == "model-response-content message-content"
+    assert PLATFORMS["gemini"]["composer_selector"] == (
+        'div[aria-label="Enter a prompt for Gemini"], '
+        'rich-textarea [contenteditable="true"][role="textbox"], '
+        'div[contenteditable="true"][role="textbox"][aria-multiline="true"]'
+    )
+    assert PLATFORMS["gemini"]["answer_selector"] == "message-content .markdown"
 
 
 @pytest.mark.asyncio
@@ -363,6 +402,15 @@ async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes
 
 
 @pytest.mark.asyncio
+async def test_gemini_accepts_verified_value_when_fill_reports_target_change():
+    client = GeminiFilledDespiteErrorClient()
+
+    await client._enter_prompt("session", "gemini", "@e47", "hello")
+
+    assert [call[0] for call in client.calls] == ["fill"]
+
+
+@pytest.mark.asyncio
 async def test_chatgpt_submits_using_native_send_button():
     client = FillFallbackClient()
     await client._submit_prompt("session", "chatgpt", "@e42")
@@ -370,6 +418,42 @@ async def test_chatgpt_submits_using_native_send_button():
         "click",
         'button[aria-label="发送"], button[aria-label="Send prompt"]',
     )
+
+
+@pytest.mark.asyncio
+async def test_gemini_submits_using_native_send_button():
+    client = FillFallbackClient()
+    await client._submit_prompt("session", "gemini", "@e47")
+    click = next(call for call in client.calls if call[0] == "click")
+    assert click[:2] == (
+        "click",
+        'button[aria-label*="Send" i]',
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_retries_native_send_until_submission_state_changes():
+    client = GeminiSubmitClient(
+        [
+            {"submitted": False},
+            {"submitted": False},
+            {"submitted": True},
+        ]
+    )
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    assert client.clicks == 3
+
+
+@pytest.mark.asyncio
+async def test_gemini_refreshes_send_button_ref_before_clicking():
+    client = GeminiObservedSubmitClient()
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    click = next(call for call in client.calls if call[0] == "click")
+    assert click[:2] == ("click", "@e52")
 
 
 @pytest.mark.asyncio
@@ -700,6 +784,25 @@ async def test_baidu_human_verification_returns_user_action_required(challenge_t
     )
 
     output = await client.probe("session", "baidu", "question", timeout=1)
+
+    assert output.login_required is True
+    assert output.diagnostic == "human verification required"
+
+
+@pytest.mark.asyncio
+async def test_gemini_unusual_traffic_page_requires_user_action():
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {
+                "answers": [],
+                "links": [],
+                "page_text": "Our systems have detected unusual traffic from your computer network.",
+            },
+        ]
+    )
+
+    output = await client.probe("session", "gemini", "question", timeout=1)
 
     assert output.login_required is True
     assert output.diagnostic == "human verification required"
