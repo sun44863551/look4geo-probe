@@ -177,3 +177,28 @@ async def test_service_applies_expected_term_quality_review(tmp_path: Path):
     assert attempt.status == JobStatus.SUCCEEDED
     assert attempt.quality_status == QualityStatus.FAILED
     assert attempt.quality_flags == ["expected_terms_missing"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_execution_is_persisted_as_failed_not_left_running(tmp_path: Path):
+    gate = asyncio.Event()
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(
+        FixedRouter(["chatgpt"]),
+        store,
+        {"chatgpt": ControlledAdapter("chatgpt", gate)},
+    )
+    submission = await service.run(ProbeRequest(prompt="cancel me"))
+    task = service._tasks[submission["job_id"]]
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    job = service.status(submission["job_id"])
+    result = service.result(submission["job_id"])
+    assert job.status == JobStatus.FAILED
+    assert "cancelled" in (job.diagnostic or "")
+    assert result.status == JobStatus.FAILED
+    assert "cancelled" in (result.diagnostic or "")

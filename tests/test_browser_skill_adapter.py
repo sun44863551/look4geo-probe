@@ -129,6 +129,13 @@ def test_textbox_lookup_accepts_current_qwen_label():
     ) == "@e17"
 
 
+def test_textbox_lookup_accepts_current_gemini_label():
+    page = '@e44 textbox "Enter a prompt for Gemini" [empty]'
+    assert BskCliClient._find_textbox_ref(
+        page, PLATFORMS["gemini"]["textbox"]
+    ) == "@e44"
+
+
 def test_bsk_error_detail_reads_json_message_from_stdout():
     stdout = b'{"code":"cdp_failed","message":"fill target changed"}'
     assert command_error_detail(stdout, b"") == "cdp_failed: fill target changed"

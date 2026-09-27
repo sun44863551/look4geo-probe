@@ -70,7 +70,12 @@ PLATFORMS = {
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
-        "textbox": ("输入提示", "Enter a prompt", "向 Gemini 提问"),
+        "textbox": (
+            "输入提示",
+            "Enter a prompt",
+            "Enter a prompt for Gemini",
+            "向 Gemini 提问",
+        ),
         "composer_selector": 'rich-textarea textarea, textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "Sign in", "Continue with Google"),
         "conversation_marker": "/app/",
