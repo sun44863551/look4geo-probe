@@ -23,7 +23,7 @@ def test_doctor_resolves_dependencies_from_project_not_callers_cwd(tmp_path, mon
 
     expected_root = Path(__file__).resolve().parents[1]
     assert checks["ai_search_hub"]["detail"] == str(expected_root / "vendor/AI-Search-Hub")
-    assert checks["promptfoo"]["detail"] == str(expected_root / "tools/promptfoo")
+    assert checks["promptfoo"]["path"] == str(expected_root / "tools/promptfoo")
 
 
 def test_doctor_uses_explicit_node_when_path_is_empty(tmp_path, monkeypatch):
@@ -49,4 +49,43 @@ def test_doctor_reports_missing_explicit_node_without_crashing(tmp_path, monkeyp
         "required": True,
         "ok": False,
         "detail": "missing",
+    }
+
+
+def test_doctor_marks_promptfoo_unhealthy_when_cli_cannot_start(tmp_path):
+    promptfoo = tmp_path / "tools/promptfoo/node_modules/.bin/promptfoo"
+    promptfoo.parent.mkdir(parents=True)
+    promptfoo.write_text("#!/bin/sh\necho cannot-start >&2\nexit 7\n", encoding="utf-8")
+    promptfoo.chmod(0o755)
+
+    checks = {check["name"]: check for check in collect_checks(project_root=tmp_path)}
+
+    assert checks["promptfoo"]["ok"] is False
+    assert checks["promptfoo"]["detail"] == "cannot-start"
+
+
+def test_doctor_runs_promptfoo_with_project_local_config_dir(tmp_path):
+    promptfoo = tmp_path / "tools/promptfoo/node_modules/.bin/promptfoo"
+    promptfoo.parent.mkdir(parents=True)
+    promptfoo.write_text(
+        "#!/bin/sh\n"
+        'test "$PROMPTFOO_CONFIG_DIR" = "$EXPECTED_CONFIG_DIR" || exit 9\n'
+        "echo 0.123.1\n",
+        encoding="utf-8",
+    )
+    promptfoo.chmod(0o755)
+
+    expected = tmp_path / "data/promptfoo"
+    env = {"EXPECTED_CONFIG_DIR": str(expected)}
+    checks = {
+        check["name"]: check
+        for check in collect_checks(project_root=tmp_path, extra_env=env)
+    }
+
+    assert checks["promptfoo"] == {
+        "name": "promptfoo",
+        "required": True,
+        "ok": True,
+        "detail": "0.123.1",
+        "path": str(tmp_path / "tools/promptfoo"),
     }
