@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from look4geo_probe.adapters.base import ProbeAdapter
@@ -97,3 +99,26 @@ async def test_adapter_chain_preserves_final_timeout_failure_kind():
 
     assert result.status == JobStatus.FAILED
     assert result.failure == FailureKind.TIMEOUT
+
+
+class SlowAdapter(ResultAdapter):
+    async def run(self, platform, request):
+        self.calls += 1
+        await asyncio.sleep(1)
+        raise AssertionError("hard timeout did not stop slow adapter")
+
+
+@pytest.mark.asyncio
+async def test_adapter_chain_hard_timeout_falls_back_and_classifies_timeout():
+    primary = SlowAdapter("browser_skill", JobStatus.SUCCEEDED)
+    fallback = ResultAdapter("ai_search_hub", JobStatus.SUCCEEDED)
+    chain = AdapterChain(
+        "qwen", [primary, fallback], attempt_timeouts=[0.01, 0.1]
+    )
+
+    result = await chain.run("qwen", ProbeRequest(prompt="hello"))
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert result.adapter == "ai_search_hub"
+    assert "browser_skill: hard timeout" in (result.diagnostic or "")
+    assert primary.calls == fallback.calls == 1

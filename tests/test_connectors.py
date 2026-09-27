@@ -68,6 +68,7 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
     assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
+    assert adapters["qwen"].attempt_timeouts == [105.0, 130.0]
 
 
 def test_local_connector_instructions_preserve_private_cli_contract():
