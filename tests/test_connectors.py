@@ -62,14 +62,32 @@ def test_codex_and_workbuddy_use_same_adapter_policy(tmp_path, monkeypatch):
 
 def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "browser-test")
+    monkeypatch.delenv("LOOK4GEO_CAMOUFOX_ENABLED", raising=False)
 
     adapters = build_adapters(tmp_path, runtime="default")
 
     assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
-    assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["gemini"].adapter_names == [
+        "camoufox_gemini",
+        "browser_skill",
+        "ai_search_hub",
+    ]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
     assert adapters["baidu"].adapter_names == ["browser_skill"]
+    assert adapters["deepseek"].adapter_names == ["browser_skill"]
+    assert adapters["yuanbao"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["perplexity"].adapter_names == ["browser_skill"]
+    assert adapters["grok"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert "qwen" not in adapters
+
+
+def test_disabling_camoufox_restores_previous_gemini_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "browser-test")
+    monkeypatch.setenv("LOOK4GEO_CAMOUFOX_ENABLED", "0")
+
+    adapters = build_adapters(tmp_path, runtime="default")
+
+    assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
 
 
 def test_local_connector_instructions_preserve_private_cli_contract():

@@ -5,8 +5,10 @@ from pathlib import Path
 
 from .adapters.ai_search_hub import AIHubAdapter
 from .adapters.browser_skill import BskCliClient, BrowserSkillAdapter
+from .adapters.camoufox_gemini import CamoufoxGeminiAdapter, CamoufoxRuntime
 from .adapters.registry import AdapterChain
 from .config import load_configuration
+from .doctor import parse_camoufox_mode
 from .router import Router
 from .service import ProbeService
 from .storage import ProbeStore
@@ -19,16 +21,38 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         artifact_root=root / "data/runs",
     )
     del runtime  # Both callers intentionally use one machine-local adapter policy.
-    fallback_platforms = {"doubao", "yuanbao", "gemini", "grok"}
+    chains = {
+        "doubao": [browser, ai_hub],
+        "deepseek": [browser],
+        "yuanbao": [browser, ai_hub],
+        "baidu": [browser],
+        "chatgpt": [browser],
+        "gemini": [browser, ai_hub],
+        "perplexity": [browser],
+        "grok": [browser, ai_hub],
+    }
+    if parse_camoufox_mode(os.environ.get("LOOK4GEO_CAMOUFOX_ENABLED")) != "disabled":
+        profile_dir = Path(
+            os.environ.get(
+                "LOOK4GEO_CAMOUFOX_PROFILE_DIR",
+                root / "data/camoufox/profiles/gemini",
+            )
+        )
+        camoufox = CamoufoxGeminiAdapter(
+            CamoufoxRuntime(
+                root,
+                headless=os.environ.get("LOOK4GEO_CAMOUFOX_HEADLESS", "0") == "1",
+                browser=os.environ.get(
+                    "LOOK4GEO_CAMOUFOX_BROWSER", "152.0.4-beta.30"
+                ),
+            ),
+            profile_dir,
+            root / "data/camoufox/artifacts",
+        )
+        chains["gemini"].insert(0, camoufox)
     return {
-        platform: AdapterChain(
-            platform,
-            [browser, ai_hub] if platform in fallback_platforms else [browser],
-        )
-        for platform in (
-            "doubao", "deepseek", "yuanbao", "baidu",
-            "chatgpt", "gemini", "perplexity", "grok",
-        )
+        platform: AdapterChain(platform, adapters)
+        for platform, adapters in chains.items()
     }
 
 

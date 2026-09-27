@@ -120,6 +120,26 @@ async def test_adapter_chain_stops_on_login_required_instead_of_waiting_for_fall
     assert fallback.calls == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [FailureKind.SEND_FAILED, FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT],
+)
+async def test_gemini_chain_falls_back_after_non_terminal_camoufox_failure(failure):
+    camoufox = ResultAdapter(
+        "camoufox_gemini", JobStatus.FAILED, failure=failure
+    )
+    browser = ResultAdapter("browser_skill", JobStatus.SUCCEEDED)
+
+    result = await AdapterChain("gemini", [camoufox, browser]).run(
+        "gemini", ProbeRequest(prompt="hello")
+    )
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert result.adapter == "browser_skill"
+    assert camoufox.calls == browser.calls == 1
+
+
 class SlowAdapter(ResultAdapter):
     async def run(self, platform, request):
         self.calls += 1
