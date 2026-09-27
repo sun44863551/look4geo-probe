@@ -6,12 +6,26 @@ import stat
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
-from ..models import FailureKind, JobStatus, PlatformAttempt, ProbeRequest
+from ..models import (
+    FailureKind,
+    JobStatus,
+    PlatformAttempt,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRecord,
+    SourceRole,
+)
+from ..sources import citations_from_sources, merge_sources, normalize_source_url
+from ..validity import answer_is_valid_measurement
 
 GEMINI_URL = "https://gemini.google.com/app"
 COMPOSER_SELECTOR = (
@@ -30,6 +44,8 @@ LOGIN_MARKERS = (
     "异常流量",
 )
 RATE_LIMIT_MARKERS = ("reached your limit", "rate limit", "try again later", "达到上限")
+SOURCE_PANEL_SELECTOR = "source-panel a[href], sources-list a[href]"
+EXCLUDED_SOURCE_DOMAINS = frozenset({"gemini.google.com", "google.com"})
 
 
 @dataclass(frozen=True)
@@ -51,6 +67,71 @@ class GeminiBrowserRuntime(Protocol):
     async def probe(
         self, profile_dir: Path, prompt: str, timeout: float, artifact_dir: Path
     ) -> GeminiBrowserResult: ...
+
+
+async def extract_gemini_answer(page) -> str:
+    answers = page.locator(ANSWER_SELECTOR)
+    if not await answers.count():
+        return ""
+    return (await answers.last.inner_text()).strip()
+
+
+async def _link_payloads(page, selector: str) -> list[dict]:
+    try:
+        return await page.locator(selector).evaluate_all(
+            "elements => elements.map(element => ({"
+            "url: element.href || '', title: (element.innerText || '').trim()}))"
+        )
+    except Exception:
+        return []
+
+
+def _source_records(
+    links: list[dict] | tuple[tuple[str, str | None], ...],
+    *,
+    role: SourceRole,
+    origin: SourceEvidenceOrigin,
+) -> list[SourceRecord]:
+    records: list[SourceRecord] = []
+    for link in links:
+        if isinstance(link, dict):
+            url = str(link.get("url") or "")
+            title = str(link.get("title") or "").strip() or None
+        else:
+            url, title = link
+        normalized = normalize_source_url(
+            url, excluded_domains=EXCLUDED_SOURCE_DOMAINS
+        )
+        if normalized is None:
+            continue
+        records.append(
+            SourceRecord(
+                url=normalized,
+                title=title,
+                domain=urlsplit(normalized).hostname or "",
+                source_role=role,
+                evidence_origin=origin,
+                linked_in_answer=role == SourceRole.CITED,
+            )
+        )
+    return records
+
+
+async def extract_gemini_sources(page) -> list[SourceRecord]:
+    cited = await _link_payloads(page, f"{ANSWER_SELECTOR} a[href]")
+    surfaced = await _link_payloads(page, SOURCE_PANEL_SELECTOR)
+    return merge_sources(
+        _source_records(
+            cited,
+            role=SourceRole.CITED,
+            origin=SourceEvidenceOrigin.ANSWER_DOM,
+        )
+        + _source_records(
+            surfaced,
+            role=SourceRole.SURFACED,
+            origin=SourceEvidenceOrigin.SOURCE_PANEL,
+        )
+    )
 
 
 class GeminiPageDriver:
@@ -163,8 +244,21 @@ class GeminiPageDriver:
                 failure=FailureKind.SEND_FAILED,
                 diagnostic="Gemini submission state did not change after 3 attempts",
             )
+        answer = await self._wait_for_answer()
+        sources = await extract_gemini_sources(self.page)
         return GeminiBrowserResult(
-            status=JobStatus.SUCCEEDED, answer=await self._wait_for_answer()
+            status=JobStatus.SUCCEEDED,
+            answer=answer,
+            cited_links=tuple(
+                (source.url, source.title)
+                for source in sources
+                if source.source_role == SourceRole.CITED
+            ),
+            surfaced_links=tuple(
+                (source.url, source.title)
+                for source in sources
+                if source.source_role == SourceRole.SURFACED
+            ),
         )
 
     async def probe(
@@ -313,7 +407,67 @@ class CamoufoxGeminiAdapter(ProbeAdapter):
 
     async def run(self, platform: str, request: ProbeRequest) -> PlatformAttempt:
         self._require_gemini(platform)
-        raise NotImplementedError("Gemini browser result conversion is not implemented")
+        artifact_dir = self.artifact_root / str(uuid4())
+        result = await self.runtime.probe(
+            self.profile_dir,
+            request.prompt,
+            self.timeout,
+            artifact_dir,
+        )
+        finished_at = datetime.now(timezone.utc)
+        common = {
+            "platform": "gemini",
+            "adapter": self.name,
+            "diagnostic": result.diagnostic,
+            "failure": result.failure,
+            "query_original": request.prompt,
+            "query_sent": request.prompt,
+            "query_normalized": False,
+            "artifact_paths": list(result.artifact_paths),
+            "finished_at": finished_at,
+        }
+        if result.status != JobStatus.SUCCEEDED:
+            return PlatformAttempt(status=result.status, **common)
+
+        answer = result.answer.strip()
+        blocked_text = answer.casefold()
+        valid = answer_is_valid_measurement(
+            request.prompt, answer, min_answer_chars=1
+        ) and not any(marker in blocked_text for marker in LOGIN_MARKERS + RATE_LIMIT_MARKERS)
+        if not valid:
+            return PlatformAttempt(
+                status=JobStatus.FAILED,
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="Gemini returned no valid newest assistant answer",
+                **{key: value for key, value in common.items() if key not in {"failure", "diagnostic"}},
+            )
+
+        sources = merge_sources(
+            _source_records(
+                result.cited_links,
+                role=SourceRole.CITED,
+                origin=SourceEvidenceOrigin.ANSWER_DOM,
+            )
+            + _source_records(
+                result.surfaced_links,
+                role=SourceRole.SURFACED,
+                origin=SourceEvidenceOrigin.SOURCE_PANEL,
+            )
+        )
+        capture_status = (
+            SourceCaptureStatus.CAPTURED
+            if sources
+            else SourceCaptureStatus.NONE_EXPOSED
+        )
+        return PlatformAttempt(
+            status=JobStatus.SUCCEEDED,
+            raw_answer=answer,
+            normalized_answer=answer,
+            citations=citations_from_sources(sources),
+            sources=sources,
+            source_capture_status=capture_status,
+            **common,
+        )
 
     async def cancel(self, job_id: str) -> None:
         return None

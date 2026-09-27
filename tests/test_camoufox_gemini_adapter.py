@@ -7,9 +7,18 @@ from look4geo_probe.adapters.camoufox_gemini import (
     CamoufoxRuntime,
     GeminiBrowserResult,
     GeminiPageDriver,
+    extract_gemini_answer,
+    extract_gemini_sources,
 )
 from look4geo_probe.adapters.types import AdapterHealth
-from look4geo_probe.models import FailureKind, JobStatus, ProbeRequest
+from look4geo_probe.models import (
+    FailureKind,
+    JobStatus,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRole,
+)
 
 
 class FakeRuntime:
@@ -292,3 +301,148 @@ def test_camoufox_runtime_defaults_to_headed_macos_and_pinned_browser(tmp_path):
     assert runtime.root == tmp_path
     assert runtime.headless is False
     assert runtime.browser == "152.0.4-beta.30"
+
+
+class ExtractionLocator:
+    def __init__(self, texts=(), links=()):
+        self.texts = list(texts)
+        self.links = list(links)
+
+    @property
+    def last(self):
+        return ExtractionLocator(self.texts[-1:], self.links)
+
+    async def count(self):
+        return len(self.texts) or len(self.links)
+
+    async def inner_text(self):
+        return self.texts[-1] if self.texts else ""
+
+    async def evaluate_all(self, script):
+        return self.links
+
+
+class ExtractionPage:
+    def __init__(self, answers, cited=(), surfaced=()):
+        self.answers = answers
+        self.cited = cited
+        self.surfaced = surfaced
+
+    def locator(self, selector):
+        if selector == "message-content .markdown":
+            return ExtractionLocator(self.answers)
+        if "message-content .markdown a" in selector:
+            return ExtractionLocator(links=self.cited)
+        if "source-panel" in selector:
+            return ExtractionLocator(links=self.surfaced)
+        return ExtractionLocator()
+
+
+@pytest.mark.asyncio
+async def test_extracts_only_newest_gemini_answer():
+    answer = await extract_gemini_answer(ExtractionPage(["old answer", "new answer"]))
+
+    assert answer == "new answer"
+
+
+@pytest.mark.asyncio
+async def test_extracts_normalizes_and_merges_gemini_sources():
+    page = ExtractionPage(
+        ["answer"],
+        cited=[
+            {
+                "url": "https://www.google.com/url?url=https%3A%2F%2Fevidence.example%2Fdoc%3Futm_source%3Dgemini",
+                "title": "Evidence",
+            }
+        ],
+        surfaced=[
+            {"url": "https://evidence.example/doc", "title": "Duplicate"},
+            {"url": "https://other.example/source?utm_medium=ai", "title": "Other"},
+            {"url": "https://gemini.google.com/app", "title": "Gemini UI"},
+        ],
+    )
+
+    sources = await extract_gemini_sources(page)
+
+    assert [source.url for source in sources] == [
+        "https://evidence.example/doc",
+        "https://other.example/source",
+    ]
+    assert sources[0].source_role == SourceRole.CITED
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert sources[0].linked_in_answer is True
+    assert sources[1].source_role == SourceRole.SURFACED
+    assert sources[1].evidence_origin == SourceEvidenceOrigin.SOURCE_PANEL
+
+
+@pytest.mark.asyncio
+async def test_adapter_converts_browser_answer_and_sources(tmp_path):
+    runtime = FakeRuntime()
+    runtime.probe = lambda *args: None
+
+    async def probe(profile_dir, prompt, timeout, artifact_dir):
+        return GeminiBrowserResult(
+            status=JobStatus.SUCCEEDED,
+            answer="A valid Gemini answer with useful evidence.",
+            cited_links=(("https://evidence.example/doc?utm_source=ai", "Evidence"),),
+            surfaced_links=(("https://other.example/source", "Other"),),
+            artifact_paths=(str(tmp_path / "answer.png"),),
+        )
+
+    runtime.probe = probe
+    attempt = await make_adapter(tmp_path, runtime).run(
+        "gemini", ProbeRequest(prompt="question")
+    )
+
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.raw_answer.startswith("A valid Gemini answer")
+    assert attempt.source_capture_status == SourceCaptureStatus.CAPTURED
+    assert [citation.url for citation in attempt.citations] == [
+        "https://evidence.example/doc"
+    ]
+    assert [source.url for source in attempt.sources] == [
+        "https://evidence.example/doc",
+        "https://other.example/source",
+    ]
+    assert attempt.query_original == attempt.query_sent == "question"
+    assert attempt.query_normalized is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    ["", "Ask away, sun!", "question", "Our systems have detected unusual traffic"],
+)
+async def test_adapter_rejects_invalid_or_blocking_answers(tmp_path, answer):
+    runtime = FakeRuntime()
+
+    async def probe(profile_dir, prompt, timeout, artifact_dir):
+        return GeminiBrowserResult(status=JobStatus.SUCCEEDED, answer=answer)
+
+    runtime.probe = probe
+    attempt = await make_adapter(tmp_path, runtime).run(
+        "gemini", ProbeRequest(prompt="question")
+    )
+
+    assert attempt.status == JobStatus.FAILED
+    assert attempt.failure == FailureKind.EXTRACTION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_adapter_records_none_exposed_separately_from_answer_success(tmp_path):
+    runtime = FakeRuntime()
+
+    async def probe(profile_dir, prompt, timeout, artifact_dir):
+        return GeminiBrowserResult(
+            status=JobStatus.SUCCEEDED,
+            answer="A valid answer without any visible source links.",
+        )
+
+    runtime.probe = probe
+    attempt = await make_adapter(tmp_path, runtime).run(
+        "gemini", ProbeRequest(prompt="question")
+    )
+
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.source_capture_status == SourceCaptureStatus.NONE_EXPOSED
+    assert attempt.sources == []
