@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from look4geo_probe.models import (
     JobStatus,
+    QualityStatus,
     PlatformAttempt,
     ProbeRequest,
     ProbeResult,
@@ -31,9 +32,9 @@ def test_manual_mode_deduplicates_platforms_preserving_order():
     assert request.platforms == ["qwen", "chatgpt"]
 
 
-def test_new_results_use_schema_version_two():
+def test_new_results_use_schema_version_three():
     result = ProbeResult(job_id="job-1", prompt="test", status="succeeded")
-    assert result.schema_version == 2
+    assert result.schema_version == 3
 
 
 def test_source_record_serializes_browser_visible_evidence():
@@ -68,6 +69,8 @@ def test_platform_attempt_defaults_to_no_exposed_sources():
     assert attempt.sources == []
     assert attempt.source_capture_status == SourceCaptureStatus.NONE_EXPOSED
     assert attempt.source_capture_diagnostic is None
+    assert attempt.quality_status == QualityStatus.NOT_CHECKED
+    assert attempt.quality_flags == []
 
 
 def test_schema_version_one_payload_remains_readable():

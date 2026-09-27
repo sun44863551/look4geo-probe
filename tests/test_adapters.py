@@ -3,7 +3,7 @@ import pytest
 from look4geo_probe.adapters.base import ProbeAdapter
 from look4geo_probe.adapters.registry import AdapterRegistry, AdapterChain, NoHealthyAdapter
 from look4geo_probe.adapters.types import AdapterHealth
-from look4geo_probe.models import JobStatus, PlatformAttempt, ProbeRequest
+from look4geo_probe.models import FailureKind, JobStatus, PlatformAttempt, ProbeRequest
 
 
 class NamedAdapter(ProbeAdapter):
@@ -31,11 +31,12 @@ def test_registry_rejects_platform_without_healthy_adapter():
 
 
 class ResultAdapter(ProbeAdapter):
-    def __init__(self, name, status, healthy=True):
+    def __init__(self, name, status, healthy=True, failure=None):
         self.name = name
         self.status = status
         self.healthy = healthy
         self.calls = 0
+        self.failure = failure
 
     async def health(self, platform):
         return AdapterHealth(self.healthy, self.name)
@@ -48,6 +49,7 @@ class ResultAdapter(ProbeAdapter):
             status=self.status,
             raw_answer="ok" if self.status == JobStatus.SUCCEEDED else "",
             diagnostic=None if self.status == JobStatus.SUCCEEDED else f"{self.name} failed",
+            failure=self.failure,
         )
 
     async def login(self, platform):
@@ -78,3 +80,20 @@ async def test_adapter_chain_skips_unhealthy_adapter():
 
     assert result.adapter == "ai_search_hub"
     assert primary.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_chain_preserves_final_timeout_failure_kind():
+    primary = ResultAdapter(
+        "browser_skill", JobStatus.FAILED, failure=FailureKind.TIMEOUT
+    )
+    fallback = ResultAdapter(
+        "ai_search_hub", JobStatus.FAILED, failure=FailureKind.TIMEOUT
+    )
+
+    result = await AdapterChain("qwen", [primary, fallback]).run(
+        "qwen", ProbeRequest(prompt="hello")
+    )
+
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.TIMEOUT

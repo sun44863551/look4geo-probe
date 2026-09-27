@@ -82,6 +82,8 @@ def test_local_connector_instructions_preserve_private_cli_contract():
         assert "--mode manual" in text
         assert "--platform" in text
         assert "source_capture_status" in text
+        assert "quality_status" in text
+        assert "--expected-term" in text
         assert "none_exposed" in text
         assert "failed" in text
 

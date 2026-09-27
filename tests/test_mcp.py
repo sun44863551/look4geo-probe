@@ -50,7 +50,7 @@ async def test_mcp_run_returns_immediately_without_waiting():
 async def test_mcp_result_is_structured_json_data():
     tools = ProbeMcpTools(FakeService())
     result = await tools.probe_result("job-2")
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3
     assert result["status"] == "succeeded"
     attempt = result["attempts"][0]
     assert attempt["status"] == "succeeded"
@@ -66,3 +66,16 @@ async def test_mcp_run_accepts_repeat_count():
     tools = ProbeMcpTools(service)
     await tools.probe_run("source?", repeats=3)
     assert service.last_request.repeats == 3
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_accepts_expected_terms_for_quality_review():
+    service = FakeService()
+    tools = ProbeMcpTools(service)
+
+    await tools.probe_run("source?", expected_terms=["DCTA", "环己二胺四乙酸"])
+
+    assert service.last_request.options["expected_terms"] == [
+        "DCTA",
+        "环己二胺四乙酸",
+    ]

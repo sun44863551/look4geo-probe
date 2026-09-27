@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class RouteMode(StrEnum):
@@ -50,6 +50,13 @@ class SourceCaptureStatus(StrEnum):
     CAPTURED = "captured"
     NONE_EXPOSED = "none_exposed"
     UNSUPPORTED = "unsupported"
+    FAILED = "failed"
+
+
+class QualityStatus(StrEnum):
+    NOT_CHECKED = "not_checked"
+    PASSED = "passed"
+    REVIEW_REQUIRED = "review_required"
     FAILED = "failed"
 
 
@@ -125,6 +132,8 @@ class PlatformAttempt(StrictModel):
     sources: list[SourceRecord] = Field(default_factory=list)
     source_capture_status: SourceCaptureStatus = SourceCaptureStatus.NONE_EXPOSED
     source_capture_diagnostic: str | None = None
+    quality_status: QualityStatus = QualityStatus.NOT_CHECKED
+    quality_flags: list[str] = Field(default_factory=list)
     diagnostic: str | None = None
     failure: FailureKind | None = None
     query_original: str = ""

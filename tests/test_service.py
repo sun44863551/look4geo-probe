@@ -9,6 +9,7 @@ from look4geo_probe.models import (
     PlatformAttempt,
     PlatformHealth,
     ProbeRequest,
+    QualityStatus,
     RoutingDecision,
 )
 from look4geo_probe.service import ProbeService
@@ -158,3 +159,21 @@ async def test_service_records_finished_time_for_every_attempt(tmp_path: Path):
     assert attempt.started_at <= adapter.entered_at
     assert attempt.finished_at is not None
     assert attempt.finished_at >= adapter.entered_at
+
+
+@pytest.mark.asyncio
+async def test_service_applies_expected_term_quality_review(tmp_path: Path):
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(
+        FixedRouter(["doubao"]), store, {"doubao": ControlledAdapter("doubao")}
+    )
+
+    submission = await service.run(
+        ProbeRequest(prompt="research", options={"expected_terms": ["DCTA"]})
+    )
+    await service.wait(submission["job_id"])
+
+    attempt = service.result(submission["job_id"]).attempts[0]
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.quality_status == QualityStatus.FAILED
+    assert attempt.quality_flags == ["expected_terms_missing"]

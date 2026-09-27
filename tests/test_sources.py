@@ -25,6 +25,14 @@ def test_normalize_source_url_canonicalizes_host_fragment_and_tracking_parameter
     assert normalized == "https://example.com/product?id=42"
 
 
+def test_normalize_source_url_converts_unicode_hyphens():
+    normalized = normalize_source_url(
+        "https://www.macklin.cn/products/125572‑95‑4"
+    )
+
+    assert normalized == "https://www.macklin.cn/products/125572-95-4"
+
+
 def test_normalize_source_url_unwraps_one_normal_url_redirect_parameter():
     normalized = normalize_source_url(
         "https://chat.deepseek.com/redirect?url=https%3A%2F%2FExample.com%2Fspec%3Fsku%3D7%26utm_medium%3Dchat",

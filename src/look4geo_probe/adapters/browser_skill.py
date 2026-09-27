@@ -906,7 +906,11 @@ class BrowserSkillAdapter(ProbeAdapter):
                 session_id,
                 platform,
                 normalized.sent,
-                float(request.options.get("timeout", self.default_timeout)),
+                float(
+                    request.options.get(
+                        "timeout", 90.0 if platform == "qwen" else self.default_timeout
+                    )
+                ),
             )
             if output.login_required:
                 return PlatformAttempt(

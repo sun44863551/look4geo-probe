@@ -5,6 +5,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .models import Citation, SourceEvidenceOrigin, SourceRecord, SourceRole
 
 TRACKING_PARAMETERS = {"gclid", "fbclid"}
+UNICODE_HYPHENS = str.maketrans({character: "-" for character in "‐‑‒–—―"})
 
 
 def _domain_is_excluded(domain: str, excluded_domains: frozenset[str]) -> bool:
@@ -24,7 +25,7 @@ def normalize_source_url(
     excluded_domains: frozenset[str] = frozenset(),
 ) -> str | None:
     try:
-        parsed = urlsplit(url.strip())
+        parsed = urlsplit(url.strip().translate(UNICODE_HYPHENS))
         if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
             return None
         if parsed.username is not None or parsed.password is not None:

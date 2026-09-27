@@ -13,6 +13,10 @@ For one named platform, run:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --json`
 
+When the expected entity is known, add one or more quality aliases:
+
+`/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform doubao --expected-term DCTA --expected-term 环己二胺四乙酸 --json`
+
 For several named platforms, repeat `--platform`, for example:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --platform perplexity --json`
@@ -32,5 +36,6 @@ The optional local `look4geo-probe` MCP tools expose the same service and result
 - `source_capture_status: captured` means at least one visible source was collected; `none_exposed` means the UI exposed none.
 - `source_capture_status: failed` means source extraction failed. Read `source_capture_diagnostic`; do not turn this into "no sources" and do not change a successful answer `status` to failed.
 - Keep legacy `citations` in reports alongside the richer `sources` field.
+- Treat answer `status` as transport/extraction status. Report `quality_status` separately: `passed` means an expected alias matched, `review_required` means a structural warning such as a non-ASCII URL hyphen, and `failed` means configured expected terms were absent. Never count `quality_status: failed` as a trustworthy business answer.
 
 This is a local-only skill. Do not publish or install it in a public skill or connector catalog.

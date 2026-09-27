@@ -785,6 +785,7 @@ class FakeBrowserClient:
         self.started = []
         self.stopped = []
         self.last_prompt = None
+        self.last_timeout = None
 
     async def start(self, platform):
         self.started.append(platform)
@@ -792,6 +793,7 @@ class FakeBrowserClient:
 
     async def probe(self, session_id, platform, prompt, timeout):
         self.last_prompt = prompt
+        self.last_timeout = timeout
         if self.error:
             raise self.error
         return self.output
@@ -839,6 +841,28 @@ async def test_browser_adapter_returns_answer_and_stops_session(tmp_path: Path):
     assert attempt.source_capture_status == SourceCaptureStatus.CAPTURED
     assert attempt.source_capture_diagnostic is None
     assert client.stopped == ["session-1"]
+
+
+@pytest.mark.asyncio
+async def test_qwen_uses_shorter_bounded_default_timeout(tmp_path: Path):
+    client = FakeBrowserClient(BrowserProbeOutput(answer="完整回答"))
+    adapter = BrowserSkillAdapter(
+        client=client, artifact_root=tmp_path, default_timeout=180
+    )
+
+    await adapter.run("qwen", ProbeRequest(prompt="测试"))
+
+    assert client.last_timeout == 90
+
+
+@pytest.mark.asyncio
+async def test_explicit_timeout_overrides_qwen_default(tmp_path: Path):
+    client = FakeBrowserClient(BrowserProbeOutput(answer="完整回答"))
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    await adapter.run("qwen", ProbeRequest(prompt="测试", options={"timeout": 12}))
+
+    assert client.last_timeout == 12
 
 
 @pytest.mark.asyncio

@@ -106,7 +106,11 @@ class AIHubAdapter(ProbeAdapter):
             "--output",
             str(output),
         ]
-        timeout = float(request.options.get("timeout", self.default_timeout))
+        timeout = float(
+            request.options.get(
+                "timeout", 120.0 if platform == "qwen" else self.default_timeout
+            )
+        )
         try:
             result = await self.runner.run(command, timeout)
         except asyncio.TimeoutError:
@@ -114,6 +118,7 @@ class AIHubAdapter(ProbeAdapter):
                 platform=platform,
                 adapter=self.name,
                 status=JobStatus.FAILED,
+                failure=FailureKind.TIMEOUT,
                 diagnostic="timeout",
             )
 

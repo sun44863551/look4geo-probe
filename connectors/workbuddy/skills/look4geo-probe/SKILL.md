@@ -20,6 +20,8 @@ For more than one explicit platform, repeat the existing flag:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --platform perplexity --json`
 
+When a known entity or product name must be checked, repeat `--expected-term`, for example `--expected-term DCTA --expected-term 环己二胺四乙酸`.
+
 ## Source truth boundary
 
 - `sources` records only links visibly exposed by the current product UI. It does not claim to reveal unexposed sources used internally by a model.
@@ -27,5 +29,6 @@ For more than one explicit platform, repeat the existing flag:
 - `source_capture_status: captured` means visible sources were collected. `none_exposed` means the UI exposed none.
 - `source_capture_status: failed` is an extraction problem, described by `source_capture_diagnostic`; it is separate from the answer `status` and must not be reported as "not mentioned" or "no sources".
 - Preserve legacy `citations` and return the richer `sources` records as well.
+- Keep `quality_status` separate from answer `status`: `passed` confirms an expected alias, `review_required` flags structural concerns such as a non-ASCII URL hyphen, and `failed` means configured expected terms were absent. Exclude quality failures from trusted business measurements.
 
 Do not upload, publish, or install this project through WorkBuddy's public Experts, Skills, or Connectors catalog. The code, browser credentials, job database, and results must remain on this Mac.

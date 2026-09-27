@@ -5,6 +5,7 @@ import pytest
 
 from look4geo_probe.adapters.ai_search_hub import AIHubAdapter, CommandResult
 from look4geo_probe.models import (
+    FailureKind,
     JobStatus,
     ProbeRequest,
     SourceCaptureStatus,
@@ -68,6 +69,7 @@ async def test_ai_hub_timeout_is_failed_attempt(tmp_path: Path):
     adapter = AIHubAdapter(tmp_path, runner=runner)
     attempt = await adapter.run("gemini", ProbeRequest(prompt="test"))
     assert attempt.status == JobStatus.FAILED
+    assert attempt.failure == FailureKind.TIMEOUT
     assert attempt.diagnostic == "timeout"
     assert attempt.sources == []
 
@@ -107,3 +109,17 @@ async def test_ai_hub_rejects_landing_page_placeholder_as_success(tmp_path: Path
     assert attempt.status == JobStatus.FAILED
     assert attempt.failure.value == "extraction_failed"
     assert "valid answer" in (attempt.diagnostic or "")
+
+
+@pytest.mark.asyncio
+async def test_ai_hub_qwen_uses_bounded_default_timeout(tmp_path: Path):
+    output = tmp_path / "answer.txt"
+    output.write_text("这是一个足够长且有效的完整回答内容，用于验证默认超时时间。", encoding="utf-8")
+    runner = FakeRunner(CommandResult(0, "done", ""))
+    adapter = AIHubAdapter(tmp_path, runner=runner, default_timeout=180)
+
+    await adapter.run(
+        "qwen", ProbeRequest(prompt="测试问题", options={"output": str(output)})
+    )
+
+    assert runner.commands[0][1] == 120

@@ -11,6 +11,7 @@ from .models import (
     ProbeResult,
 )
 from .storage import ProbeStore, StoredJob
+from .quality import assess_attempt_quality
 
 
 class ProbeService:
@@ -64,6 +65,7 @@ class ProbeService:
             for sample_index in range(1, request.repeats + 1):
                 started_at = datetime.now(timezone.utc)
                 attempt = await self.adapters[name].run(name, request)
+                attempt = assess_attempt_quality(attempt, request)
                 attempts.append(
                     attempt.model_copy(
                         update={
