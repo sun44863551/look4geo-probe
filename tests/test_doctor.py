@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from look4geo_probe.doctor import collect_checks, summarize_checks
+import pytest
+
+from look4geo_probe.doctor import (
+    collect_camoufox_check,
+    collect_checks,
+    parse_camoufox_mode,
+    summarize_checks,
+)
 
 
 def test_required_failure_makes_doctor_unhealthy():
@@ -89,3 +96,38 @@ def test_doctor_runs_promptfoo_with_project_local_config_dir(tmp_path):
         "detail": "0.123.1",
         "path": str(tmp_path / "tools/promptfoo"),
     }
+
+
+def test_camoufox_mode_has_exact_three_state_semantics():
+    assert parse_camoufox_mode(None) == "auto"
+    assert parse_camoufox_mode("0") == "disabled"
+    assert parse_camoufox_mode("1") == "required"
+    with pytest.raises(ValueError, match="LOOK4GEO_CAMOUFOX_ENABLED"):
+        parse_camoufox_mode("yes")
+
+
+def test_disabled_camoufox_is_optional_and_healthy(tmp_path):
+    check = collect_camoufox_check(
+        tmp_path, {"LOOK4GEO_CAMOUFOX_ENABLED": "0"}
+    )
+
+    assert check == {
+        "name": "camoufox",
+        "required": False,
+        "ok": True,
+        "detail": "disabled",
+        "mode": "disabled",
+        "profile_path": str(tmp_path / "data/camoufox/profiles/gemini"),
+        "cache_path": str(tmp_path / "data/camoufox/cache"),
+    }
+
+
+def test_invalid_camoufox_mode_is_a_required_readable_failure(tmp_path):
+    check = collect_camoufox_check(
+        tmp_path, {"LOOK4GEO_CAMOUFOX_ENABLED": "sometimes"}
+    )
+
+    assert check["required"] is True
+    assert check["ok"] is False
+    assert check["mode"] == "invalid"
+    assert "LOOK4GEO_CAMOUFOX_ENABLED" in check["detail"]

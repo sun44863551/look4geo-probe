@@ -101,3 +101,23 @@ def test_ai_search_hub_is_a_pinned_submodule_initialized_by_bootstrap():
     assert "https://github.com/minsight-ai-info/AI-Search-Hub.git" in gitmodules
     assert "git submodule update --init --recursive vendor/AI-Search-Hub" in bootstrap
     assert "git clone https://github.com/minsight-ai-info/AI-Search-Hub.git" not in bootstrap
+
+
+def test_camoufox_is_pinned_and_bootstrapped_into_project_local_cache():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts/bootstrap-camoufox.sh").read_text(encoding="utf-8")
+    local_env = (ROOT / "config/local.env.example").read_text(encoding="utf-8")
+
+    assert 'camoufox = ["camoufox==0.5.6"]' in pyproject
+    assert "XDG_CACHE_HOME" in bootstrap
+    assert "data/camoufox/cache" in bootstrap
+    assert "official/stable/152.0.4-beta.30" in bootstrap
+    assert "sudo" not in bootstrap
+    for name in (
+        "LOOK4GEO_CAMOUFOX_ENABLED",
+        "LOOK4GEO_CAMOUFOX_PROFILE_DIR",
+        "LOOK4GEO_CAMOUFOX_BROWSER",
+        "LOOK4GEO_CAMOUFOX_HEADLESS",
+    ):
+        assert name in local_env
+    assert "password" not in local_env.casefold()
