@@ -4,10 +4,12 @@ import pytest
 
 from look4geo_probe.adapters.camoufox_gemini import (
     CamoufoxGeminiAdapter,
+    CamoufoxRuntime,
     GeminiBrowserResult,
+    GeminiPageDriver,
 )
 from look4geo_probe.adapters.types import AdapterHealth
-from look4geo_probe.models import JobStatus, ProbeRequest
+from look4geo_probe.models import FailureKind, JobStatus, ProbeRequest
 
 
 class FakeRuntime:
@@ -108,3 +110,185 @@ async def test_login_delegates_without_exposing_credentials(tmp_path):
 
     assert result == {"status": "succeeded", "platform": "gemini"}
     assert runtime.login_profiles == [tmp_path / "profile"]
+
+
+class FakeLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    @property
+    def last(self):
+        return self
+
+    async def count(self):
+        if "message-content" in self.selector:
+            return 1 if self.page.answers else 0
+        if "contenteditable" in self.selector or "prompt for Gemini" in self.selector:
+            return 1 if self.page.has_composer else 0
+        if "Send" in self.selector or "发送" in self.selector:
+            return 1
+        if "Stop" in self.selector or "停止" in self.selector:
+            if self.page.transition == "stop" and self.page.sent and not self.page.stop_seen:
+                self.page.stop_seen = True
+                return 1
+            return 0
+        if "conversation-turn" in self.selector:
+            return self.page.turns
+        return 1
+
+    async def fill(self, value):
+        self.page.fill_calls += 1
+        if self.page.detach_first_fill and self.page.fill_calls == 1:
+            raise RuntimeError("element detached")
+        self.page.composer = value
+
+    async def inner_text(self):
+        if self.selector == "body":
+            return self.page.body
+        if "message-content" in self.selector:
+            if self.page.answer_reads:
+                return self.page.answer_reads.pop(0)
+            return self.page.answers[-1]
+        return self.page.composer
+
+    async def click(self):
+        self.page.click_calls += 1
+        if self.page.click_calls < self.page.transition_at:
+            return
+        self.page.sent = True
+        if self.page.transition == "composer":
+            self.page.composer = ""
+        elif self.page.transition == "url":
+            self.page.url = "https://gemini.google.com/app/conversation"
+        elif self.page.transition == "turn":
+            self.page.turns += 1
+
+
+class FakePage:
+    def __init__(
+        self,
+        *,
+        body="",
+        has_composer=True,
+        transition="composer",
+        transition_at=1,
+        answers=("answer", "answer"),
+        detach_first_fill=False,
+        navigation_timeout=False,
+    ):
+        self.body = body
+        self.has_composer = has_composer
+        self.transition = transition
+        self.transition_at = transition_at
+        self.answers = list(answers)
+        self.answer_reads = list(answers)
+        self.detach_first_fill = detach_first_fill
+        self.navigation_timeout = navigation_timeout
+        self.composer = ""
+        self.fill_calls = 0
+        self.click_calls = 0
+        self.locator_calls: list[str] = []
+        self.sent = False
+        self.stop_seen = False
+        self.turns = 0
+        self.url = "https://gemini.google.com/app"
+
+    async def goto(self, url, **kwargs):
+        if self.navigation_timeout:
+            raise TimeoutError("navigation timed out")
+        self.url = url
+
+    def locator(self, selector):
+        self.locator_calls.append(selector)
+        return FakeLocator(self, selector)
+
+
+@pytest.mark.asyncio
+async def test_page_driver_login_succeeds_only_when_composer_is_visible(tmp_path):
+    success = await GeminiPageDriver(FakePage()).login()
+    blocked = await GeminiPageDriver(FakePage(has_composer=False)).login()
+
+    assert success["status"] == "succeeded"
+    assert blocked["status"] == "user_action_required"
+
+
+@pytest.mark.asyncio
+async def test_page_driver_re_resolves_detached_composer_and_verifies_prompt(tmp_path):
+    page = FakePage(detach_first_fill=True)
+
+    result = await GeminiPageDriver(page).probe("exact prompt", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert result.answer == "answer"
+    assert page.fill_calls == 2
+    assert page.composer == ""
+
+
+@pytest.mark.asyncio
+async def test_page_driver_retries_send_three_times(tmp_path):
+    page = FakePage(transition_at=3)
+
+    result = await GeminiPageDriver(page).probe("hello", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.click_calls == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["composer", "stop", "url", "turn"])
+async def test_page_driver_accepts_verified_send_transitions(tmp_path, transition):
+    result = await GeminiPageDriver(FakePage(transition=transition)).probe(
+        "hello", 1, tmp_path
+    )
+
+    assert result.status == JobStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "failure"),
+    [
+        ("Sign in to continue to Gemini", FailureKind.LOGIN_REQUIRED),
+        ("Before you continue to Google", FailureKind.LOGIN_REQUIRED),
+        ("Complete this CAPTCHA", FailureKind.LOGIN_REQUIRED),
+        ("Our systems have detected unusual traffic", FailureKind.LOGIN_REQUIRED),
+        ("You've reached your limit. Try again later", FailureKind.RATE_LIMITED),
+    ],
+)
+async def test_page_driver_classifies_blocking_pages(tmp_path, body, failure):
+    result = await GeminiPageDriver(FakePage(body=body)).probe("hello", 1, tmp_path)
+
+    assert result.status in {JobStatus.FAILED, JobStatus.WAITING_FOR_LOGIN}
+    assert result.failure == failure
+
+
+@pytest.mark.asyncio
+async def test_page_driver_classifies_navigation_timeout(tmp_path):
+    result = await GeminiPageDriver(FakePage(navigation_timeout=True)).probe(
+        "hello", 1, tmp_path
+    )
+
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_page_driver_fails_after_three_unchanged_send_attempts(tmp_path):
+    page = FakePage(transition_at=99)
+
+    result = await GeminiPageDriver(page).probe("hello", 1, tmp_path)
+
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.SEND_FAILED
+    assert page.click_calls == 3
+
+
+def test_camoufox_runtime_defaults_to_headed_macos_and_pinned_browser(tmp_path):
+    runtime = CamoufoxRuntime(
+        tmp_path, headless=False, browser="152.0.4-beta.30"
+    )
+
+    assert runtime.root == tmp_path
+    assert runtime.headless is False
+    assert runtime.browser == "152.0.4-beta.30"
