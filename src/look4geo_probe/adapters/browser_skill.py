@@ -25,7 +25,13 @@ from ..validity import CONTAMINATION_RE
 PLATFORMS = {
     "doubao": {
         "url": "https://www.doubao.com/chat/?channel=sysceo&from_login=1",
-        "textbox": ("发送消息", "输入消息", "问问豆包", "发消息..."),
+        "textbox": (
+            "发送消息",
+            "输入消息",
+            "问问豆包",
+            "发消息...",
+            "发消息或按住空格说话...",
+        ),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "扫码登录"),
         "blocking_login_markers": (
