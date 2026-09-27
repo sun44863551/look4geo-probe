@@ -14,14 +14,23 @@ def summarize_checks(checks: list[dict]) -> dict:
 
 
 def _command_version(
-    name: str, args: list[str], *, executable: str | None = None
+    name: str,
+    args: list[str],
+    *,
+    executable: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     executable = executable or shutil.which(name)
     if not executable or (os.path.sep in executable and not Path(executable).is_file()):
         return False, "missing"
     try:
         completed = subprocess.run(
-            [executable, *args], capture_output=True, text=True, timeout=10, check=False
+            [executable, *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={**os.environ, **(extra_env or {})},
         )
     except OSError:
         return False, "missing"
@@ -29,7 +38,9 @@ def _command_version(
     return completed.returncode == 0, detail[0] if detail else executable
 
 
-def collect_checks(project_root: Path | None = None) -> list[dict]:
+def collect_checks(
+    project_root: Path | None = None, *, extra_env: dict[str, str] | None = None
+) -> list[dict]:
     root = project_root or Path(__file__).resolve().parents[2]
     chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
     checks: list[dict] = []
@@ -49,6 +60,15 @@ def collect_checks(project_root: Path | None = None) -> list[dict]:
     ):
         ok, detail = _command_version(name, args, executable=executable)
         checks.append({"name": name, "required": required, "ok": ok, "detail": detail})
+    promptfoo = root / "tools/promptfoo/node_modules/.bin/promptfoo"
+    promptfoo_env = {
+        **(extra_env or {}),
+        "PROMPTFOO_CONFIG_DIR": str(root / "data/promptfoo"),
+        "PROMPTFOO_DISABLE_TELEMETRY": "1",
+    }
+    promptfoo_ok, promptfoo_detail = _command_version(
+        "promptfoo", ["--version"], executable=str(promptfoo), extra_env=promptfoo_env
+    )
     checks.extend(
         [
             {"name": "chrome", "required": True, "ok": chrome.exists(), "detail": str(chrome)},
@@ -61,8 +81,9 @@ def collect_checks(project_root: Path | None = None) -> list[dict]:
             {
                 "name": "promptfoo",
                 "required": True,
-                "ok": (root / "tools/promptfoo/node_modules/.bin/promptfoo").exists(),
-                "detail": str(root / "tools/promptfoo"),
+                "ok": promptfoo_ok,
+                "detail": promptfoo_detail,
+                "path": str(root / "tools/promptfoo"),
             },
         ]
     )

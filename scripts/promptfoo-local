@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PROMPTFOO_BIN=${LOOK4GEO_PROMPTFOO_BIN:-"$PROJECT_DIR/tools/promptfoo/node_modules/.bin/promptfoo"}
+PROMPTFOO_CONFIG_DIR=${LOOK4GEO_PROMPTFOO_CONFIG_DIR:-"$PROJECT_DIR/data/promptfoo"}
+
+if [ ! -x "$PROMPTFOO_BIN" ]; then
+    printf '%s\n' "Promptfoo is not installed at $PROMPTFOO_BIN" >&2
+    exit 1
+fi
+
+mkdir -p "$PROMPTFOO_CONFIG_DIR"
+export PROMPTFOO_CONFIG_DIR
+export PROMPTFOO_DISABLE_TELEMETRY=${PROMPTFOO_DISABLE_TELEMETRY:-1}
+
+exec "$PROMPTFOO_BIN" "$@"
