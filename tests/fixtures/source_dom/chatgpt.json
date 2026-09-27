@@ -1,0 +1,11 @@
+{
+  "platform": "chatgpt",
+  "observation": "observed researched answer exposes external sources as answer-body anchors; no separate source drawer trigger was present",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=chatgpt", "title": "Evidence"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}

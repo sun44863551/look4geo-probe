@@ -1,0 +1,11 @@
+{
+  "platform": "grok",
+  "observation": "live source inspection blocked by Cloudflare human verification; fixture covers the shared visible-source contract pending Task 8 re-verification",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=grok", "title": "Evidence"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}

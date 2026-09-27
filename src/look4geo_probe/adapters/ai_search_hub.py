@@ -5,12 +5,24 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
-from ..models import Citation, JobStatus, PlatformAttempt, ProbeRequest
+from ..models import (
+    FailureKind,
+    JobStatus,
+    PlatformAttempt,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRecord,
+    SourceRole,
+)
+from ..sources import citations_from_sources, merge_sources, normalize_source_url
+from ..validity import answer_is_valid_measurement
 
-SUPPORTED_PLATFORMS = {"doubao", "yuanbao", "qwen", "gemini", "grok"}
+SUPPORTED_PLATFORMS = {"doubao", "yuanbao", "gemini", "grok"}
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
 
 
@@ -102,6 +114,7 @@ class AIHubAdapter(ProbeAdapter):
                 platform=platform,
                 adapter=self.name,
                 status=JobStatus.FAILED,
+                failure=FailureKind.TIMEOUT,
                 diagnostic="timeout",
             )
 
@@ -119,14 +132,45 @@ class AIHubAdapter(ProbeAdapter):
             )
 
         answer = output.read_text(encoding="utf-8") if output.exists() else result.stdout.strip()
-        citations = [Citation(url=url) for url in dict.fromkeys(URL_PATTERN.findall(answer))]
+        if not answer_is_valid_measurement(request.prompt, answer, min_answer_chars=20):
+            return PlatformAttempt(
+                platform=platform,
+                adapter=self.name,
+                status=JobStatus.FAILED,
+                raw_answer=answer,
+                normalized_answer=answer.strip(),
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="AI-Search-Hub output did not contain a valid answer",
+                artifact_paths=[str(output)] if output.exists() else [],
+            )
+        source_candidates = []
+        for url in dict.fromkeys(URL_PATTERN.findall(answer)):
+            normalized_url = normalize_source_url(url)
+            if normalized_url is None:
+                continue
+            source_candidates.append(
+                SourceRecord(
+                    url=normalized_url,
+                    domain=urlsplit(normalized_url).hostname or "",
+                    source_role=SourceRole.CITED,
+                    evidence_origin=SourceEvidenceOrigin.ANSWER_DOM,
+                    linked_in_answer=True,
+                )
+            )
+        sources = merge_sources(source_candidates)
         return PlatformAttempt(
             platform=platform,
             adapter=self.name,
             status=JobStatus.SUCCEEDED,
             raw_answer=answer,
             normalized_answer=answer.strip(),
-            citations=citations,
+            citations=citations_from_sources(sources),
+            sources=sources,
+            source_capture_status=(
+                SourceCaptureStatus.CAPTURED
+                if sources
+                else SourceCaptureStatus.NONE_EXPOSED
+            ),
             artifact_paths=[str(output)] if output.exists() else [],
             diagnostic=diagnostic or None,
         )

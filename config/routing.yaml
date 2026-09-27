@@ -5,7 +5,7 @@ signals:
   doubao: [抖音, 字节, 消费, 热点]
   deepseek: [推理, 代码, 技术]
   yuanbao: [微信, 公众号, 腾讯]
-  qwen: [阿里, 淘宝, 电商]
+  baidu: [百度, 文心, 搜索, 中文网页]
   chatgpt: [品牌推荐, global, international]
   gemini: [google, 全球网页, 海外搜索]
   perplexity: [引用, 来源, 可核验, citation]

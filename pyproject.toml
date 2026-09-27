@@ -24,5 +24,6 @@ probe = "look4geo_probe.cli:app"
 packages = ["src/look4geo_probe"]
 
 [tool.pytest.ini_options]
+addopts = "-p no:cacheprovider"
 pythonpath = ["src"]
 testpaths = ["tests"]

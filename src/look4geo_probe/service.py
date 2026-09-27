@@ -11,6 +11,7 @@ from .models import (
     ProbeResult,
 )
 from .storage import ProbeStore, StoredJob
+from .quality import assess_attempt_quality
 
 
 class ProbeService:
@@ -60,19 +61,34 @@ class ProbeService:
 
     async def _execute(self, job_id: str, request: ProbeRequest, routing) -> None:
         attempts = []
-        for name in routing.selected_platforms:
-            for sample_index in range(1, request.repeats + 1):
-                started_at = datetime.now(timezone.utc)
-                attempt = await self.adapters[name].run(name, request)
-                attempts.append(
-                    attempt.model_copy(
-                        update={
-                            "sample_index": sample_index,
-                            "started_at": started_at,
-                            "finished_at": attempt.finished_at or datetime.now(timezone.utc),
-                        }
+        try:
+            for name in routing.selected_platforms:
+                for sample_index in range(1, request.repeats + 1):
+                    started_at = datetime.now(timezone.utc)
+                    attempt = await self.adapters[name].run(name, request)
+                    attempt = assess_attempt_quality(attempt, request)
+                    attempts.append(
+                        attempt.model_copy(
+                            update={
+                                "sample_index": sample_index,
+                                "started_at": started_at,
+                                "finished_at": attempt.finished_at or datetime.now(timezone.utc),
+                            }
+                        )
                     )
-                )
+        except asyncio.CancelledError:
+            diagnostic = "cancelled: worker stopped before completion"
+            result = ProbeResult(
+                job_id=job_id,
+                prompt=request.prompt,
+                status=JobStatus.FAILED,
+                routing=routing,
+                attempts=list(attempts),
+                diagnostic=diagnostic,
+            )
+            self.store.save_result(result)
+            self.jobs.transition(job_id, JobStatus.FAILED, diagnostic)
+            raise
         successes = sum(attempt.status == JobStatus.SUCCEEDED for attempt in attempts)
         waiting = any(attempt.status == JobStatus.WAITING_FOR_LOGIN for attempt in attempts)
         if successes == len(attempts):

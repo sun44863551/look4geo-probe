@@ -5,18 +5,39 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
-from ..models import Citation, FailureKind, JobStatus, PlatformAttempt, ProbeRequest
+from ..models import (
+    FailureKind,
+    JobStatus,
+    PlatformAttempt,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRecord,
+    SourceRole,
+)
+from ..sources import citations_from_sources, merge_sources, normalize_source_url
 from ..validity import CONTAMINATION_RE
 
 PLATFORMS = {
     "doubao": {
         "url": "https://www.doubao.com/chat/?channel=sysceo&from_login=1",
-        "textbox": ("发送消息", "输入消息", "问问豆包"),
+        "textbox": (
+            "发送消息",
+            "输入消息",
+            "问问豆包",
+            "发消息...",
+            "发消息或按住空格说话...",
+        ),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "扫码登录"),
+        "blocking_login_markers": (
+            "登录以解锁更多功能",
+            "使用豆包或飞书账号登录",
+        ),
         "conversation_marker": "/chat/",
         "answer_selector": '[data-testid="message_text_content"]',
     },
@@ -45,21 +66,30 @@ PLATFORMS = {
         "conversation_marker": "/chat/",
         "answer_selector": '[data-role="assistant"], [class*="assistant"], [class*="markdown"], [class*="answer"]',
     },
-    "qwen": {
-        "url": "https://chat.qwen.ai/",
-        "textbox": ("询问 Qwen", "输入消息", "How can I help you today?", "Ask anything"),
-        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
-        "login_markers": ("登录", "Sign in", "Continue with Google"),
-        "conversation_marker": "/c/",
-        "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="markdown"], article',
+    "baidu": {
+        "url": "https://chat.baidu.com/",
+        "textbox": (),
+        "composer_selector": "textarea.ci-textarea",
+        "login_markers": ("请登录", "登录同步历史对话"),
+        "conversation_marker": "/search/",
+        "answer_selector": ".chat-search-answer-generate",
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
-        "textbox": ("输入提示", "Enter a prompt", "向 Gemini 提问"),
-        "composer_selector": 'rich-textarea textarea, textarea, div[role="textbox"], div[contenteditable="true"]',
+        "textbox": (
+            "输入提示",
+            "Enter a prompt",
+            "Enter a prompt for Gemini",
+            "向 Gemini 提问",
+        ),
+        "composer_selector": (
+            'div[aria-label="Enter a prompt for Gemini"], '
+            'rich-textarea [contenteditable="true"][role="textbox"], '
+            'div[contenteditable="true"][role="textbox"][aria-multiline="true"]'
+        ),
         "login_markers": ("登录", "Sign in", "Continue with Google"),
         "conversation_marker": "/app/",
-        "answer_selector": "model-response-content message-content",
+        "answer_selector": "message-content .markdown",
     },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
@@ -78,8 +108,111 @@ PLATFORMS = {
         "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="response"], [class*="markdown"]',
     },
 }
+for _platform_config in PLATFORMS.values():
+    _platform_config.update(
+        {
+            "source_trigger_labels": (),
+            "source_trigger_selectors": (),
+            "source_panel_selectors": (),
+            "source_panel_labels": (),
+            "source_card_selectors": (),
+            "source_url_attributes": ("href",),
+            "excluded_source_domains": (),
+        }
+    )
+
+PLATFORMS["doubao"].update(
+    {
+        "source_trigger_labels": ("来源", "参考资料", "网页"),
+        "source_trigger_selectors": ('[data-testid*="source"]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("来源", "参考资料"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("doubao.com",),
+    }
+)
+PLATFORMS["deepseek"].update(
+    {
+        "source_trigger_labels": ("个网页", "搜索到"),
+        "source_panel_labels": ("搜索结果",),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("deepseek.com",),
+    }
+)
+PLATFORMS["yuanbao"].update(
+    {
+        "source_trigger_labels": ("源", "引用来源"),
+        "source_panel_selectors": (".agent-dialogue-references",),
+        "source_panel_labels": ("引用来源",),
+        "source_card_selectors": (".agent-dialogue-references__item",),
+        "source_url_attributes": ("data-url", "href"),
+        "excluded_source_domains": ("yuanbao.tencent.com",),
+    }
+)
+PLATFORMS["baidu"].update(
+    {
+        "source_trigger_labels": ("来源", "参考资料"),
+        "source_panel_labels": ("来源", "参考资料"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("wenxin.baidu.com", "chat.baidu.com"),
+    }
+)
+PLATFORMS["chatgpt"].update(
+    {
+        "source_trigger_labels": ("Sources", "来源", "引用"),
+        "source_trigger_selectors": ('button[aria-label*="source" i]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("chatgpt.com",),
+    }
+)
+PLATFORMS["gemini"].update(
+    {
+        "source_trigger_labels": ("View source details", "Sources", "来源"),
+        "source_trigger_selectors": (
+            'button[aria-label*="View source details" i]',
+        ),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("gemini.google.com",),
+    }
+)
+PLATFORMS["perplexity"].update(
+    {
+        "source_trigger_labels": ("个来源", "来源", "Sources"),
+        "source_panel_selectors": ('[class*="max-h-[300px]"]',),
+        "source_panel_labels": ("来源", "Sources", "链接"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("perplexity.ai",),
+    }
+)
+PLATFORMS["grok"].update(
+    {
+        "source_trigger_labels": ("Sources", "来源", "网页"),
+        "source_trigger_selectors": ('button[aria-label*="source" i]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_panel_labels": ("Sources", "来源"),
+        "source_card_selectors": ("a[href]",),
+        "excluded_source_domains": ("grok.com",),
+    }
+)
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
-URL_PATTERN = re.compile(r"https?://[^\s<>\])}]+")
+BUTTON_REF_PATTERN = re.compile(r"(@e\d+)\s+button\s+\"([^\"]+)\"")
+URL_PATTERN = re.compile(r"https?://[^\s<>\])}\u200b\u2060]+")
+
+
+def extract_text_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in URL_PATTERN.finditer(text):
+        url = match.group(0).rstrip(".,;:!?，。；：！？'\"")
+        following = text[match.end() :]
+        if url.endswith("-") and re.match(r"\r?\n\d+(?:\r?\n|$)", following):
+            url = url[:-1]
+        if url:
+            urls.append(url)
+    return urls
 TRANSIENT_ANSWER_LINES = {
     "正在搜索网络",
     "跳过",
@@ -102,6 +235,8 @@ HUMAN_VERIFICATION_MARKERS = (
     "你出生于哪一年",
     "通过验证以确保正常访问",
     "请拖动下方滑块完成验证",
+    "Our systems have detected unusual traffic from your computer network",
+    "我们的系统检测到您的计算机网络中存在异常流量",
 )
 PREAMBLE_PATTERN = re.compile(
     r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
@@ -128,6 +263,9 @@ def command_error_detail(stdout: bytes, stderr: bytes) -> str:
 class BrowserProbeOutput:
     answer: str = ""
     citations: list[str] = field(default_factory=list)
+    sources: list[SourceRecord] = field(default_factory=list)
+    source_capture_status: SourceCaptureStatus = SourceCaptureStatus.NONE_EXPOSED
+    source_capture_diagnostic: str | None = None
     login_required: bool = False
     failure: FailureKind | None = None
     diagnostic: str | None = None
@@ -160,7 +298,7 @@ def select_main_answer(platform: str, candidates: list[str]) -> str:
     usable = [candidate.strip() for candidate in candidates if is_valid_answer(candidate)]
     if not usable:
         return ""
-    if platform in {"perplexity", "qwen"}:
+    if platform in {"perplexity", "yuanbao"}:
         return max(usable, key=len)
     return usable[-1]
 
@@ -219,6 +357,16 @@ def answers_after_baseline(candidates: list[str], baseline: list[str]) -> list[s
     return delta
 
 
+def answer_links_for_text(page: dict, answer: str) -> list[dict[str, str]]:
+    target = answer.strip()
+    entries = page.get("answer_entries", [])
+    for entry in reversed(entries if isinstance(entries, list) else []):
+        if str(entry.get("text") or "").strip() == target:
+            return list(entry.get("links", []))
+    links = page.get("answer_links", [])
+    return list(links) if isinstance(links, list) else []
+
+
 def submission_confirmed(
     platform: str,
     before_url: str,
@@ -263,6 +411,7 @@ class BskCliClient:
         navigation = await self._run_json(
             "navigate", config["url"], "--session", session_id, timeout=timeout
         )
+        await self._dismiss_blocking_overlays(session_id, platform)
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
         if page_requires_human_verification({"page_text": page_text}):
@@ -307,6 +456,14 @@ class BskCliClient:
                     login_required=True,
                     diagnostic="human verification required",
                 )
+            if any(
+                marker in str(page.get("page_text") or "")
+                for marker in config.get("blocking_login_markers", ())
+            ):
+                return BrowserProbeOutput(
+                    login_required=True,
+                    diagnostic="login required after submission",
+                )
             if page_is_rate_limited(page):
                 return BrowserProbeOutput(
                     failure=FailureKind.RATE_LIMITED,
@@ -335,14 +492,36 @@ class BskCliClient:
             elif current_text == previous:
                 stable_rounds += 1
                 if stable_rounds >= 2:
+                    answer_links = answer_links_for_text(page, current_text)
+                    if not answer_links:
+                        answer_links = [
+                            {"url": str(url), "title": None}
+                            for url in page.get("links", [])
+                        ]
+                    answer_links.extend(
+                        {"url": url, "title": None}
+                        for url in extract_text_urls(current_text)
+                    )
+                    try:
+                        sources, source_status, source_diagnostic = (
+                            await self._collect_visible_sources(
+                                session_id, platform, answer_links
+                            )
+                        )
+                    except Exception as error:
+                        sources = []
+                        source_status = SourceCaptureStatus.FAILED
+                        source_diagnostic = str(error)
                     return BrowserProbeOutput(
                         answer=current_text,
-                        citations=list(
-                            dict.fromkeys(
-                                [str(url) for url in page.get("links", [])]
-                                + URL_PATTERN.findall(current_text)
-                            )
-                        ),
+                        citations=[
+                            source.url
+                            for source in sources
+                            if source.source_role == SourceRole.CITED
+                        ],
+                        sources=sources,
+                        source_capture_status=source_status,
+                        source_capture_diagnostic=source_diagnostic,
                     )
             else:
                 stable_rounds = 0
@@ -370,7 +549,12 @@ class BskCliClient:
                 )
                 return
             except RuntimeError:
-                pass
+                if platform == "gemini":
+                    value = await self._composer_text(
+                        session_id, PLATFORMS[platform]["composer_selector"]
+                    )
+                    if value.strip() == prompt.strip():
+                        return
 
         selector = PLATFORMS[platform]["composer_selector"]
         await self._run_json("click", selector, "--session", session_id, timeout=timeout)
@@ -393,6 +577,24 @@ class BskCliClient:
         expression = f"document.execCommand('insertText', false, {json.dumps(prompt)})"
         await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
 
+    async def _dismiss_blocking_overlays(self, session_id: str, platform: str) -> bool:
+        if platform not in {"doubao", "baidu"}:
+            return False
+        marker = "下载豆包电脑版" if platform == "doubao" else "全新上线任务模式"
+        expression = (
+            "(() => { const marker = " + json.dumps(marker, ensure_ascii=False) + "; "
+            "const candidates = [...document.querySelectorAll('[role=dialog],body > div')]; "
+            "const promo = candidates.find(node => (node.innerText || '').includes(marker)); "
+            "if (!promo) return false; const controls = [...promo.querySelectorAll('button')]; "
+            "const close = controls.find(node => /^(关闭|close)$/i.test(((node.getAttribute('aria-label') "
+            "|| '') + ' ' + (node.innerText || '')).trim())) || controls[0]; if (!close) return false; "
+            "close.click(); return true; })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        return bool(self._result_value(result))
+
     async def _submit_prompt(
         self,
         session_id: str,
@@ -401,15 +603,36 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
-        if platform == "qwen":
-            try:
+        if platform == "gemini":
+            state_expression = (
+                "(() => { const composer = document.querySelector(" +
+                json.dumps(PLATFORMS["gemini"]["composer_selector"]) +
+                "); const text = composer ? (composer.innerText || composer.textContent || "") : ""; "
+                "const stop = [...document.querySelectorAll('button')].some(button => "
+                "/stop/i.test((button.getAttribute('aria-label') || '') + ' ' + "
+                "(button.innerText || ''))); const conversation = /^\\/app\\/.+/.test(location.pathname); "
+                "return {submitted: stop || conversation || !text.trim()}; })()"
+            )
+            for _ in range(3):
+                observation = await self._run_json(
+                    "observe", "--session", session_id, timeout=timeout
+                )
+                send_ref = self._find_button_ref(
+                    str(observation.get("text", "")) if isinstance(observation, dict) else "",
+                    ("Send message", "发送消息"),
+                )
                 await self._run_json(
-                    "click", 'button[aria-label="发送"], button[aria-label="Send"]',
+                    "click", send_ref or 'button[aria-label*="Send" i]',
                     "--session", session_id, timeout=timeout
                 )
-                return
-            except RuntimeError:
-                pass
+                await asyncio.sleep(self.poll_interval)
+                result = await self._run_json(
+                    "evaluate", state_expression, "--session", session_id, timeout=timeout
+                )
+                state = self._result_value(result)
+                if state is True or (isinstance(state, dict) and state.get("submitted")):
+                    return
+            raise RuntimeError("Gemini submission state did not change after 3 attempts")
         if platform == "chatgpt":
             try:
                 await self._run_json(
@@ -507,14 +730,193 @@ class BskCliClient:
             + ")]; const bodyText = document.body ? (document.body.innerText || '') : ''; "
             "const buttons = [...document.querySelectorAll('button')]; "
             "return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
+            "answer_entries:nodes.map(n => ({text:(n.innerText || '').trim(),links:"
+            "[...n.querySelectorAll('a[href]')].map(a => ({url:a.href,title:"
+            "(a.innerText || a.textContent || '').trim() || null}))})).filter(entry => entry.text),"
+            "answer_links:nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => "
+            "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
             "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
             "generating:buttons.some(b => /停止生成|Stop generating|Stop responding/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
-            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit/i.test(bodyText)}; })()"
+            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit/i.test(bodyText),"
+            "page_text:bodyText}; })()"
         )
         result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
         value = self._result_value(result)
         return value if isinstance(value, dict) else {"answers": [], "links": []}
+
+    async def _collect_visible_sources(
+        self,
+        session_id: str,
+        platform: str,
+        answer_links: list[dict[str, str]],
+    ) -> tuple[list[SourceRecord], SourceCaptureStatus, str | None]:
+        config = PLATFORMS[platform]
+        excluded_domains = frozenset(config["excluded_source_domains"])
+        candidates: list[SourceRecord] = []
+        for link in answer_links:
+            record = self._source_record(
+                link,
+                role=SourceRole.CITED,
+                origin=SourceEvidenceOrigin.ANSWER_DOM,
+                excluded_domains=excluded_domains,
+            )
+            if record is not None:
+                candidates.append(record)
+
+        has_source_rule = bool(
+            config["source_trigger_labels"] or config["source_trigger_selectors"]
+        )
+        if not has_source_rule:
+            sources = merge_sources(candidates)
+            if sources:
+                return sources, SourceCaptureStatus.CAPTURED, None
+            return (
+                [],
+                SourceCaptureStatus.UNSUPPORTED,
+                f"visible source panel is not configured for {platform}",
+            )
+
+        open_state: dict | None = None
+        open_error: Exception | None = None
+        for _ in range(2):
+            try:
+                open_state = await self._open_source_panel(session_id, platform)
+                open_error = None
+                break
+            except Exception as error:
+                open_error = error
+        if open_error is not None:
+            return merge_sources(candidates), SourceCaptureStatus.FAILED, str(open_error)
+        if not isinstance(open_state, dict) or not open_state.get("found"):
+            sources = merge_sources(candidates)
+            status = (
+                SourceCaptureStatus.CAPTURED
+                if sources
+                else SourceCaptureStatus.NONE_EXPOSED
+            )
+            return sources, status, None
+        if not open_state.get("opened"):
+            return (
+                merge_sources(candidates),
+                SourceCaptureStatus.FAILED,
+                str(open_state.get("diagnostic") or "source panel could not be opened"),
+            )
+
+        previous_cards: list[dict] | None = None
+        stable_cards: list[dict] = []
+        for _ in range(4):
+            panel_page = await self._source_panel_page(session_id, platform)
+            cards = list(panel_page.get("cards", [])) if isinstance(panel_page, dict) else []
+            if previous_cards is not None and cards == previous_cards:
+                stable_cards = cards
+                break
+            previous_cards = cards
+            stable_cards = cards
+            await asyncio.sleep(self.poll_interval)
+
+        for card in stable_cards:
+            record = self._source_record(
+                card,
+                role=SourceRole.SURFACED,
+                origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                excluded_domains=excluded_domains,
+            )
+            if record is not None:
+                candidates.append(record)
+        sources = merge_sources(candidates)
+        status = (
+            SourceCaptureStatus.CAPTURED
+            if sources
+            else SourceCaptureStatus.NONE_EXPOSED
+        )
+        return sources, status, None
+
+    @staticmethod
+    def _source_record(
+        candidate: dict,
+        *,
+        role: SourceRole,
+        origin: SourceEvidenceOrigin,
+        excluded_domains: frozenset[str],
+    ) -> SourceRecord | None:
+        normalized_url = normalize_source_url(
+            str(candidate.get("url") or ""), excluded_domains=excluded_domains
+        )
+        if normalized_url is None:
+            return None
+        return SourceRecord(
+            url=normalized_url,
+            title=str(candidate.get("title") or "").strip() or None,
+            domain=urlsplit(normalized_url).hostname or "",
+            snippet=str(candidate.get("snippet") or "").strip() or None,
+            source_role=role,
+            evidence_origin=origin,
+            linked_in_answer=role == SourceRole.CITED,
+        )
+
+    async def _open_source_panel(self, session_id: str, platform: str) -> dict:
+        config = PLATFORMS[platform]
+        expression = (
+            "(() => { const selectors = "
+            + json.dumps(list(config["source_trigger_selectors"]))
+            + "; const labels = "
+            + json.dumps(list(config["source_trigger_labels"]), ensure_ascii=False)
+            + "; const answerSelector = "
+            + json.dumps(config["answer_selector"])
+            + "; const answers = [...document.querySelectorAll(answerSelector)]; "
+            "const root = answers.at(-1) || document; let trigger = null; "
+            "for (const selector of selectors) { trigger = root.querySelector(selector) || "
+            "document.querySelector(selector); if (trigger) break; } "
+            "if (!trigger && labels.length) { const controls = [...root.querySelectorAll("
+            "'button,[role=button],a,[onclick]'), ...document.querySelectorAll("
+            "'button,[role=button],a,[onclick]')]; trigger = controls.find(node => { const text = "
+            "((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim(); "
+            "return labels.some(label => text.includes(label)); }); } "
+            "if (!trigger) return {found:false,opened:false}; "
+            "try { trigger.click(); return {found:true,opened:true}; } "
+            "catch (error) { return {found:true,opened:false,diagnostic:String(error)}; } })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        value = self._result_value(result)
+        return value if isinstance(value, dict) else {"found": False, "opened": False}
+
+    async def _source_panel_page(self, session_id: str, platform: str) -> dict:
+        config = PLATFORMS[platform]
+        expression = (
+            "(() => { const panelSelectors = "
+            + json.dumps(list(config["source_panel_selectors"]))
+            + "; const panelLabels = "
+            + json.dumps(list(config["source_panel_labels"]), ensure_ascii=False)
+            + "; const cardSelectors = "
+            + json.dumps(list(config["source_card_selectors"]))
+            + "; const urlAttributes = "
+            + json.dumps(list(config["source_url_attributes"]))
+            + "; const panels = panelSelectors.flatMap(selector => "
+            "[...document.querySelectorAll(selector)]); if (!panels.length && panelLabels.length) { "
+            "const labelled = [...document.querySelectorAll('h1,h2,h3,h4,[role=heading]')].filter("
+            "node => panelLabels.some(label => (node.innerText || '').includes(label))); "
+            "for (const heading of labelled) { let node = heading; for (let depth = 0; node && depth < 6; "
+            "depth += 1, node = node.parentElement) { if (cardSelectors.some(selector => "
+            "node.querySelector(selector))) { panels.push(node); break; } } } } "
+            "if (!panels.length) return {panel_found:false,cards:[]}; const cards = panels.flatMap(panel => "
+            "cardSelectors.flatMap(selector => [...panel.querySelectorAll(selector)])); "
+            "return {panel_found:true,cards:cards.map(card => { const anchor = "
+            "card.matches('a[href]') ? card : card.querySelector('a[href]'); const urlNode = "
+            "card.matches('[href],[data-url]') ? card : card.querySelector('[href],[data-url]'); "
+            "const url = urlAttributes.map(attribute => attribute === 'href' ? urlNode?.href : "
+            "urlNode?.getAttribute(attribute)).find(Boolean) || (anchor ? anchor.href : ''); return {"
+            "url, title:((card.querySelector('h1,h2,h3,h4,[role=heading]')"
+            " || anchor || card).innerText || '').trim() || null, snippet:(card.innerText || '')"
+            ".trim() || null}; })}; })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        value = self._result_value(result)
+        return value if isinstance(value, dict) else {"panel_found": False, "cards": []}
 
     @staticmethod
     def _result_value(result):
@@ -537,6 +939,13 @@ class BskCliClient:
         expected = (expected_label,) if isinstance(expected_label, str) else expected_label
         for ref, label in REF_PATTERN.findall(page_text):
             if label in expected:
+                return ref
+        return None
+
+    @staticmethod
+    def _find_button_ref(page_text: str, expected_labels: tuple[str, ...]) -> str | None:
+        for ref, label in BUTTON_REF_PATTERN.findall(page_text):
+            if label in expected_labels:
                 return ref
         return None
 
@@ -575,7 +984,11 @@ class BrowserSkillAdapter(ProbeAdapter):
                 session_id,
                 platform,
                 normalized.sent,
-                float(request.options.get("timeout", self.default_timeout)),
+                float(
+                    request.options.get(
+                        "timeout", self.default_timeout
+                    )
+                ),
             )
             if output.login_required:
                 return PlatformAttempt(
@@ -605,7 +1018,10 @@ class BrowserSkillAdapter(ProbeAdapter):
                 status=JobStatus.SUCCEEDED,
                 raw_answer=output.answer,
                 normalized_answer=output.answer.strip(),
-                citations=[Citation(url=url) for url in output.citations],
+                citations=citations_from_sources(output.sources),
+                sources=output.sources,
+                source_capture_status=output.source_capture_status,
+                source_capture_diagnostic=output.source_capture_diagnostic,
                 query_original=normalized.original,
                 query_sent=normalized.sent,
                 query_normalized=normalized.changed,

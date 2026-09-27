@@ -50,7 +50,7 @@ def test_codex_and_workbuddy_use_same_adapter_policy(tmp_path, monkeypatch):
     default = build_adapters(tmp_path, runtime="default")
 
     assert set(workbuddy) == {
-        "doubao", "deepseek", "yuanbao", "qwen",
+        "doubao", "deepseek", "yuanbao", "baidu",
         "chatgpt", "gemini", "perplexity", "grok",
     }
     assert {
@@ -68,3 +68,36 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
     assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
+    assert adapters["baidu"].adapter_names == ["browser_skill"]
+    assert "qwen" not in adapters
+
+
+def test_local_connector_instructions_preserve_private_cli_contract():
+    codex = (ROOT / "connectors/codex/SKILL.md").read_text(encoding="utf-8")
+    workbuddy = (
+        ROOT / "connectors/workbuddy/skills/look4geo-probe/SKILL.md"
+    ).read_text(encoding="utf-8")
+    readme = (ROOT / "connectors/workbuddy/README.md").read_text(encoding="utf-8")
+
+    for text in (codex, workbuddy):
+        assert "scripts/probe-local" in text
+        assert "--mode manual" in text
+        assert "--platform" in text
+        assert "source_capture_status" in text
+        assert "quality_status" in text
+        assert "--expected-term" in text
+        assert "none_exposed" in text
+        assert "failed" in text
+
+    assert "public" in readme.casefold()
+    assert "must not be uploaded" in readme
+
+
+def test_ai_search_hub_is_a_pinned_submodule_initialized_by_bootstrap():
+    gitmodules = (ROOT / ".gitmodules").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "scripts/bootstrap.sh").read_text(encoding="utf-8")
+
+    assert "vendor/AI-Search-Hub" in gitmodules
+    assert "https://github.com/minsight-ai-info/AI-Search-Hub.git" in gitmodules
+    assert "git submodule update --init --recursive vendor/AI-Search-Hub" in bootstrap
+    assert "git clone https://github.com/minsight-ai-info/AI-Search-Hub.git" not in bootstrap

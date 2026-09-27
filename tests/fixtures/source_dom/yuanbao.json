@@ -1,0 +1,11 @@
+{
+  "platform": "yuanbao",
+  "observation": "answer exposes 源 controls; the 引用来源 drawer stores destinations on source cards as data-url",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=yuanbao", "title": "Evidence"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}

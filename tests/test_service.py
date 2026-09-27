@@ -9,6 +9,7 @@ from look4geo_probe.models import (
     PlatformAttempt,
     PlatformHealth,
     ProbeRequest,
+    QualityStatus,
     RoutingDecision,
 )
 from look4geo_probe.service import ProbeService
@@ -89,10 +90,10 @@ async def test_run_returns_job_before_adapter_completes(tmp_path: Path):
 async def test_partial_success_preserves_successful_attempt(tmp_path: Path):
     store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
     service = ProbeService(
-        FixedRouter(["qwen", "gemini"]),
+        FixedRouter(["baidu", "gemini"]),
         store,
         {
-            "qwen": ControlledAdapter("qwen"),
+            "baidu": ControlledAdapter("baidu"),
             "gemini": ControlledAdapter("gemini", status=JobStatus.FAILED),
         },
     )
@@ -100,7 +101,7 @@ async def test_partial_success_preserves_successful_attempt(tmp_path: Path):
     await service.wait(submission["job_id"])
     result = service.result(submission["job_id"])
     assert result.status == JobStatus.PARTIAL
-    assert [a.platform for a in result.attempts if a.status == JobStatus.SUCCEEDED] == ["qwen"]
+    assert [a.platform for a in result.attempts if a.status == JobStatus.SUCCEEDED] == ["baidu"]
 
 
 @pytest.mark.asyncio
@@ -132,9 +133,9 @@ async def test_platforms_sharing_browser_runtime_run_serially(tmp_path: Path):
     store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
     adapter = ConcurrencyRecordingAdapter("shared-browser")
     service = ProbeService(
-        FixedRouter(["qwen", "gemini"]),
+        FixedRouter(["baidu", "gemini"]),
         store,
-        {"qwen": adapter, "gemini": adapter},
+        {"baidu": adapter, "gemini": adapter},
     )
 
     submission = await service.run(ProbeRequest(prompt="compare", repeats=2))
@@ -158,3 +159,46 @@ async def test_service_records_finished_time_for_every_attempt(tmp_path: Path):
     assert attempt.started_at <= adapter.entered_at
     assert attempt.finished_at is not None
     assert attempt.finished_at >= adapter.entered_at
+
+
+@pytest.mark.asyncio
+async def test_service_applies_expected_term_quality_review(tmp_path: Path):
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(
+        FixedRouter(["doubao"]), store, {"doubao": ControlledAdapter("doubao")}
+    )
+
+    submission = await service.run(
+        ProbeRequest(prompt="research", options={"expected_terms": ["DCTA"]})
+    )
+    await service.wait(submission["job_id"])
+
+    attempt = service.result(submission["job_id"]).attempts[0]
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.quality_status == QualityStatus.FAILED
+    assert attempt.quality_flags == ["expected_terms_missing"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_execution_is_persisted_as_failed_not_left_running(tmp_path: Path):
+    gate = asyncio.Event()
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(
+        FixedRouter(["chatgpt"]),
+        store,
+        {"chatgpt": ControlledAdapter("chatgpt", gate)},
+    )
+    submission = await service.run(ProbeRequest(prompt="cancel me"))
+    task = service._tasks[submission["job_id"]]
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    job = service.status(submission["job_id"])
+    result = service.result(submission["job_id"])
+    assert job.status == JobStatus.FAILED
+    assert "cancelled" in (job.diagnostic or "")
+    assert result.status == JobStatus.FAILED
+    assert "cancelled" in (result.diagnostic or "")

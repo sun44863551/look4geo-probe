@@ -16,12 +16,14 @@ class ProbeMcpTools:
         mode: str = "auto",
         platforms: list[str] | None = None,
         repeats: int = 1,
+        expected_terms: list[str] | None = None,
     ) -> dict:
         submission = await self.service.run(
             ProbeRequest(
                 prompt=prompt,
                 mode=RouteMode(mode),
                 platforms=platforms or [],
+                options={"expected_terms": expected_terms} if expected_terms else {},
                 repeats=repeats,
             )
         )

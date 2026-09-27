@@ -33,13 +33,20 @@ def run(
     prompt: str,
     mode: RouteMode = typer.Option(RouteMode.AUTO),
     platform: list[str] = typer.Option(None),
+    expected_term: list[str] = typer.Option(None, "--expected-term"),
     repeats: int = typer.Option(1, min=1, max=10),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     async def execute():
         service = _service_factory()
         submission = await service.run(
-            ProbeRequest(prompt=prompt, mode=mode, platforms=platform or [], repeats=repeats)
+            ProbeRequest(
+                prompt=prompt,
+                mode=mode,
+                platforms=platform or [],
+                options={"expected_terms": expected_term} if expected_term else {},
+                repeats=repeats,
+            )
         )
         await service.wait(submission["job_id"])
         return service.result(submission["job_id"])

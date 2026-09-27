@@ -1,0 +1,11 @@
+{
+  "platform": "deepseek",
+  "observation": "answer DOM contains numbered citation anchors and a visible N 个网页 search-results drawer",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=deepseek", "title": "- 11"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}

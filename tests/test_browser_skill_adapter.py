@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -7,12 +8,23 @@ from look4geo_probe.adapters.browser_skill import (
     BrowserProbeOutput,
     BrowserSkillAdapter,
     PLATFORMS,
+    answer_links_for_text,
+    extract_text_urls,
     normalize_for_browser,
     submission_confirmed,
     select_main_answer,
     command_error_detail,
 )
-from look4geo_probe.models import FailureKind, JobStatus, ProbeRequest
+from look4geo_probe.models import (
+    FailureKind,
+    JobStatus,
+    ProbeRequest,
+    SourceCaptureStatus,
+    SourceEvidenceOrigin,
+    SourceRecord,
+    SourceRole,
+)
+from look4geo_probe.sources import citations_from_sources
 
 
 def test_normalize_for_browser_preserves_original_and_records_changes():
@@ -27,7 +39,7 @@ def test_browser_skill_defines_every_probe_platform():
         "doubao",
         "deepseek",
         "yuanbao",
-        "qwen",
+        "baidu",
         "chatgpt",
         "gemini",
         "perplexity",
@@ -43,14 +55,24 @@ def test_perplexity_selects_longest_answer_not_follow_up():
     assert answer == "This is the complete researched answer with suppliers and evidence."
 
 
-def test_qwen_selects_full_answer_not_nested_tail_fragment():
-    full_answer = "完整回答：" + ("供应商、纯度、MOQ、出口文件与来源。" * 20)
-    answer = select_main_answer(
-        "qwen",
-        [full_answer, "供应商、纯度、MOQ。", "采购前请再次核验。"],
-    )
+def test_yuanbao_selects_full_answer_not_nested_source_url():
+    full_answer = "完整回答：" + ("供应商、规格、来源与采购核验建议。" * 20)
 
-    assert answer == full_answer
+    assert select_main_answer(
+        "yuanbao", [full_answer, "https://example.com/source"]
+    ) == full_answer
+
+
+def test_text_url_extraction_drops_markdown_list_separator_after_url():
+    text = "来源：https://example.com/product/123-abc-\n1\n下一项"
+
+    assert extract_text_urls(text) == ["https://example.com/product/123-abc"]
+
+
+def test_text_url_extraction_stops_at_invisible_source_label_separator():
+    text = "链接：https://example.com/product?id=42\u2060ExampleSource"
+
+    assert extract_text_urls(text) == ["https://example.com/product?id=42"]
 
 
 @pytest.mark.parametrize(
@@ -90,11 +112,27 @@ def test_textbox_lookup_accepts_current_chatgpt_label():
     ) == "@e17"
 
 
-def test_textbox_lookup_accepts_current_qwen_label():
-    page = '@e17 textbox "询问 Qwen" [empty]'
+def test_baidu_uses_current_official_entry_and_stable_dom_boundaries():
+    config = PLATFORMS["baidu"]
+
+    assert config["url"] == "https://chat.baidu.com/"
+    assert config["composer_selector"] == "textarea.ci-textarea"
+    assert config["answer_selector"] == ".chat-search-answer-generate"
+    assert config["conversation_marker"] == "/search/"
+
+
+def test_textbox_lookup_accepts_current_gemini_label():
+    page = '@e44 textbox "Enter a prompt for Gemini" [empty]'
     assert BskCliClient._find_textbox_ref(
-        page, PLATFORMS["qwen"]["textbox"]
-    ) == "@e17"
+        page, PLATFORMS["gemini"]["textbox"]
+    ) == "@e44"
+
+
+def test_textbox_lookup_accepts_current_logged_in_doubao_label():
+    page = '@e63 textbox "发消息或按住空格说话..." [empty]'
+    assert BskCliClient._find_textbox_ref(
+        page, PLATFORMS["doubao"]["textbox"]
+    ) == "@e63"
 
 
 def test_bsk_error_detail_reads_json_message_from_stdout():
@@ -114,6 +152,11 @@ class FillFallbackClient(BskCliClient):
         return {"value": True}
 
 
+class GeminiFilledDespiteErrorClient(FillFallbackClient):
+    async def _composer_text(self, session_id, selector):
+        return "hello"
+
+
 class ComposerStateClient(BskCliClient):
     def __init__(self, values):
         super().__init__("browser", poll_interval=0)
@@ -123,6 +166,35 @@ class ComposerStateClient(BskCliClient):
     async def _run_json(self, *args, timeout=30.0):
         self.calls.append(args)
         return {"value": next(self.values)}
+
+
+class GeminiSubmitClient(BskCliClient):
+    def __init__(self, states):
+        super().__init__("browser", poll_interval=0)
+        self.states = iter(states)
+        self.clicks = 0
+
+    async def _run_json(self, *args, timeout=30.0):
+        if args[0] == "click":
+            self.clicks += 1
+            return {"value": True}
+        if args[0] == "evaluate":
+            return {"value": next(self.states)}
+        return {"value": True}
+
+
+class GeminiObservedSubmitClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "observe":
+            return {"text": '@e52 button "Send message"'}
+        if args[0] == "evaluate":
+            return {"value": {"submitted": True}}
+        return {"value": True}
 
 
 class LoginOverlayClient(BskCliClient):
@@ -175,6 +247,59 @@ class DelayedAnswerClient(BskCliClient):
         return self.last_page
 
 
+class DoubaoPostSubmitLoginClient(DelayedAnswerClient):
+    pass
+
+
+class SourceCollectorClient(BskCliClient):
+    def __init__(self, open_results, panel_pages=()):
+        super().__init__("browser", poll_interval=0)
+        self.open_results = iter(open_results)
+        self.panel_pages = iter(panel_pages)
+        self.last_panel_page = {"panel_found": True, "cards": []}
+        self.open_calls = 0
+
+    async def _open_source_panel(self, session_id, platform):
+        self.open_calls += 1
+        result = next(self.open_results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def _source_panel_page(self, session_id, platform):
+        try:
+            self.last_panel_page = next(self.panel_pages)
+        except StopIteration:
+            pass
+        return self.last_panel_page
+
+
+class SourceFailureProbeClient(DelayedAnswerClient):
+    async def _collect_visible_sources(self, session_id, platform, answer_links):
+        return [], SourceCaptureStatus.FAILED, "source panel blocked"
+
+
+def configure_source_panel(monkeypatch, platform="chatgpt"):
+    config = {
+        **PLATFORMS[platform],
+        "source_trigger_labels": ("Sources",),
+        "source_trigger_selectors": ('button[data-testid="sources"]',),
+        "source_panel_selectors": ('[role="dialog"]',),
+        "source_card_selectors": ('a[data-testid="source-card"]',),
+        "excluded_source_domains": ("chatgpt.com",),
+    }
+    monkeypatch.setitem(PLATFORMS, platform, config)
+
+
+DOMESTIC_SOURCE_FIXTURES = Path(__file__).parent / "fixtures" / "source_dom"
+
+
+def load_source_fixture(platform):
+    return json.loads(
+        (DOMESTIC_SOURCE_FIXTURES / f"{platform}.json").read_text(encoding="utf-8")
+    )
+
+
 @pytest.mark.asyncio
 async def test_selector_only_composer_is_available_without_accessibility_ref():
     client = ComposerStateClient([True])
@@ -202,12 +327,59 @@ async def test_login_overlay_wins_over_hidden_composer():
     assert output.failure is None
 
 
+@pytest.mark.asyncio
+async def test_doubao_dismisses_download_promotion_before_observing():
+    client = FillFallbackClient()
+
+    dismissed = await client._dismiss_blocking_overlays("session", "doubao")
+
+    assert dismissed is True
+    assert client.calls[-1][0] == "evaluate"
+    assert "下载豆包电脑版" in client.calls[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_baidu_dismisses_task_mode_promotion_before_observing():
+    client = FillFallbackClient()
+
+    dismissed = await client._dismiss_blocking_overlays("session", "baidu")
+
+    assert dismissed is True
+    assert client.calls[-1][0] == "evaluate"
+    assert "全新上线任务模式" in client.calls[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_doubao_post_submit_login_dialog_is_not_reported_as_timeout():
+    client = DoubaoPostSubmitLoginClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {
+                "answers": [],
+                "links": [],
+                "page_text": "登录以解锁更多功能 使用豆包或飞书账号登录 扫码登录",
+            },
+        ]
+    )
+
+    output = await client.probe("session", "doubao", "question", timeout=1)
+
+    assert output.login_required is True
+    assert output.failure is None
+    assert output.diagnostic == "login required after submission"
+
+
 def test_doubao_answer_boundary_targets_message_content():
     assert PLATFORMS["doubao"]["answer_selector"] == '[data-testid="message_text_content"]'
 
 
 def test_gemini_answer_boundary_excludes_prompt_and_navigation():
-    assert PLATFORMS["gemini"]["answer_selector"] == "model-response-content message-content"
+    assert PLATFORMS["gemini"]["composer_selector"] == (
+        'div[aria-label="Enter a prompt for Gemini"], '
+        'rich-textarea [contenteditable="true"][role="textbox"], '
+        'div[contenteditable="true"][role="textbox"][aria-multiline="true"]'
+    )
+    assert PLATFORMS["gemini"]["answer_selector"] == "message-content .markdown"
 
 
 @pytest.mark.asyncio
@@ -230,6 +402,15 @@ async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes
 
 
 @pytest.mark.asyncio
+async def test_gemini_accepts_verified_value_when_fill_reports_target_change():
+    client = GeminiFilledDespiteErrorClient()
+
+    await client._enter_prompt("session", "gemini", "@e47", "hello")
+
+    assert [call[0] for call in client.calls] == ["fill"]
+
+
+@pytest.mark.asyncio
 async def test_chatgpt_submits_using_native_send_button():
     client = FillFallbackClient()
     await client._submit_prompt("session", "chatgpt", "@e42")
@@ -240,15 +421,39 @@ async def test_chatgpt_submits_using_native_send_button():
 
 
 @pytest.mark.asyncio
-async def test_qwen_submits_using_native_send_button():
+async def test_gemini_submits_using_native_send_button():
     client = FillFallbackClient()
-
-    await client._submit_prompt("session", "qwen", "@e17")
-
-    assert client.calls[-1][:2] == (
+    await client._submit_prompt("session", "gemini", "@e47")
+    click = next(call for call in client.calls if call[0] == "click")
+    assert click[:2] == (
         "click",
-        'button[aria-label="发送"], button[aria-label="Send"]',
+        'button[aria-label*="Send" i]',
     )
+
+
+@pytest.mark.asyncio
+async def test_gemini_retries_native_send_until_submission_state_changes():
+    client = GeminiSubmitClient(
+        [
+            {"submitted": False},
+            {"submitted": False},
+            {"submitted": True},
+        ]
+    )
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    assert client.clicks == 3
+
+
+@pytest.mark.asyncio
+async def test_gemini_refreshes_send_button_ref_before_clicking():
+    client = GeminiObservedSubmitClient()
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    click = next(call for call in client.calls if call[0] == "click")
+    assert click[:2] == ("click", "@e52")
 
 
 @pytest.mark.asyncio
@@ -280,8 +485,273 @@ async def test_slow_spa_response_is_submitted_once_and_detected_by_answer_delta(
     assert output.answer == "new complete answer"
 
 
+def test_browser_probe_output_defaults_to_no_exposed_sources():
+    output = BrowserProbeOutput(answer="complete")
+
+    assert output.sources == []
+    assert output.source_capture_status == SourceCaptureStatus.NONE_EXPOSED
+    assert output.source_capture_diagnostic is None
+
+
 @pytest.mark.asyncio
-async def test_qwen_transient_controls_are_not_accepted_as_answers():
+async def test_answer_links_are_cited_answer_dom_sources(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session",
+        "chatgpt",
+        [{"url": "https://Example.com/spec?utm_source=chat", "title": "Spec"}],
+    )
+
+    assert len(sources) == 1
+    assert sources[0].url == "https://example.com/spec"
+    assert sources[0].source_role == SourceRole.CITED
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert sources[0].linked_in_answer is True
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_missing_source_trigger_without_answer_links_is_none_exposed(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "chatgpt", []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_source_trigger_that_cannot_open_is_failed_without_answer_loss(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": False, "diagnostic": "source panel blocked"}]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session",
+        "chatgpt",
+        [{"url": "https://example.com/cited", "title": "Cited"}],
+    )
+
+    assert [item.url for item in sources] == ["https://example.com/cited"]
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "source panel blocked"
+
+
+@pytest.mark.asyncio
+async def test_source_collection_failure_preserves_stable_answer():
+    client = SourceFailureProbeClient(
+        [
+            {"answers": [], "links": [], "answer_links": []},
+            {"answers": ["complete answer"], "links": [], "answer_links": []},
+            {"answers": ["complete answer"], "links": [], "answer_links": []},
+            {"answers": ["complete answer"], "links": [], "answer_links": []},
+        ]
+    )
+
+    output = await client.probe("session", "deepseek", "question", timeout=1)
+
+    assert output.answer == "complete answer"
+    assert output.failure is None
+    assert output.source_capture_status == SourceCaptureStatus.FAILED
+    assert output.source_capture_diagnostic == "source panel blocked"
+
+
+@pytest.mark.asyncio
+async def test_open_empty_source_panel_is_none_exposed(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}],
+        [
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://chatgpt.com/internal", "title": "Internal"}],
+            },
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://chatgpt.com/internal", "title": "Internal"}],
+            },
+        ],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "chatgpt", []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_stale_source_trigger_is_reobserved_only_once(monkeypatch):
+    configure_source_panel(monkeypatch)
+    client = SourceCollectorClient(
+        [RuntimeError("stale element reference"), {"found": True, "opened": True}],
+        [
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://example.com/result", "title": "Result"}],
+            },
+            {
+                "panel_found": True,
+                "cards": [{"url": "https://example.com/result", "title": "Result"}],
+            },
+        ],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "chatgpt", []
+    )
+
+    assert client.open_calls == 2
+    assert sources[0].source_role == SourceRole.SURFACED
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "baidu"])
+async def test_domestic_platforms_collect_cited_and_surfaced_fixture_sources(platform):
+    fixture = load_source_fixture(platform)
+    panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}], [panel_page, panel_page]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.url for source in sources] == [
+        "https://evidence.example/spec?id=42",
+        "https://market.example/supplier",
+    ]
+    assert [source.source_role for source in sources] == [
+        SourceRole.CITED,
+        SourceRole.SURFACED,
+    ]
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "baidu"])
+async def test_domestic_platforms_report_none_exposed_when_trigger_is_absent(platform):
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "deepseek", "yuanbao", "baidu"])
+async def test_domestic_platforms_keep_citations_when_panel_open_fails(platform):
+    fixture = load_source_fixture(platform)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": False, "diagnostic": "panel unavailable"}]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.source_role for source in sources] == [SourceRole.CITED]
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "panel unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_international_platforms_collect_cited_and_surfaced_fixture_sources(platform):
+    fixture = load_source_fixture(platform)
+    panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}], [panel_page, panel_page]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.url for source in sources] == [
+        "https://evidence.example/spec?id=42",
+        "https://market.example/supplier",
+    ]
+    assert [source.source_role for source in sources] == [
+        SourceRole.CITED,
+        SourceRole.SURFACED,
+    ]
+    assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_international_platforms_report_none_exposed_without_trigger(platform):
+    client = SourceCollectorClient([{"found": False, "opened": False}])
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.NONE_EXPOSED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_international_platforms_keep_citations_when_panel_open_fails(platform):
+    fixture = load_source_fixture(platform)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": False, "diagnostic": "panel unavailable"}]
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, fixture["answer_links"]
+    )
+
+    assert [source.source_role for source in sources] == [SourceRole.CITED]
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "panel unavailable"
+
+
+def test_perplexity_links_stay_scoped_to_selected_longest_answer():
+    page = {
+        "answer_entries": [
+            {
+                "text": "Short follow-up?",
+                "links": [{"url": "https://follow-up.example", "title": "Suggestion"}],
+            },
+            {
+                "text": "This is the complete researched answer with suppliers and evidence.",
+                "links": [{"url": "https://evidence.example", "title": "Evidence"}],
+            },
+        ]
+    }
+
+    assert answer_links_for_text(
+        page, "This is the complete researched answer with suppliers and evidence."
+    ) == [{"url": "https://evidence.example", "title": "Evidence"}]
+
+
+@pytest.mark.asyncio
+async def test_baidu_transient_controls_are_not_accepted_as_answers():
     client = DelayedAnswerClient(
         [
             {"answers": [], "links": []},
@@ -291,7 +761,7 @@ async def test_qwen_transient_controls_are_not_accepted_as_answers():
         ]
     )
 
-    output = await client.probe("session", "qwen", "question", timeout=0.01)
+    output = await client.probe("session", "baidu", "question", timeout=0.01)
 
     assert output.failure in {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
     assert output.answer == ""
@@ -305,7 +775,7 @@ async def test_qwen_transient_controls_are_not_accepted_as_answers():
         "通过验证以确保正常访问。\n请拖动下方滑块完成验证。",
     ],
 )
-async def test_qwen_human_verification_returns_user_action_required(challenge_text):
+async def test_baidu_human_verification_returns_user_action_required(challenge_text):
     client = DelayedAnswerClient(
         [
             {"answers": [], "links": [], "page_text": ""},
@@ -313,7 +783,26 @@ async def test_qwen_human_verification_returns_user_action_required(challenge_te
         ]
     )
 
-    output = await client.probe("session", "qwen", "question", timeout=1)
+    output = await client.probe("session", "baidu", "question", timeout=1)
+
+    assert output.login_required is True
+    assert output.diagnostic == "human verification required"
+
+
+@pytest.mark.asyncio
+async def test_gemini_unusual_traffic_page_requires_user_action():
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {
+                "answers": [],
+                "links": [],
+                "page_text": "Our systems have detected unusual traffic from your computer network.",
+            },
+        ]
+    )
+
+    output = await client.probe("session", "gemini", "question", timeout=1)
 
     assert output.login_required is True
     assert output.diagnostic == "human verification required"
@@ -439,6 +928,7 @@ class FakeBrowserClient:
         self.started = []
         self.stopped = []
         self.last_prompt = None
+        self.last_timeout = None
 
     async def start(self, platform):
         self.started.append(platform)
@@ -446,6 +936,7 @@ class FakeBrowserClient:
 
     async def probe(self, session_id, platform, prompt, timeout):
         self.last_prompt = prompt
+        self.last_timeout = timeout
         if self.error:
             raise self.error
         return self.output
@@ -456,15 +947,72 @@ class FakeBrowserClient:
 
 @pytest.mark.asyncio
 async def test_browser_adapter_returns_answer_and_stops_session(tmp_path: Path):
+    sources = [
+        SourceRecord(
+            url="https://example.com/source",
+            title="Evidence",
+            domain="example.com",
+            snippet=None,
+            source_role=SourceRole.CITED,
+            evidence_origin=SourceEvidenceOrigin.ANSWER_DOM,
+            linked_in_answer=True,
+        ),
+        SourceRecord(
+            url="https://other.example/card",
+            title="Related source",
+            domain="other.example",
+            snippet="Visible in source panel",
+            source_role=SourceRole.SURFACED,
+            evidence_origin=SourceEvidenceOrigin.SOURCE_PANEL,
+            linked_in_answer=False,
+        ),
+    ]
     client = FakeBrowserClient(
-        BrowserProbeOutput(answer="回答内容", citations=["https://example.com/source"])
+        BrowserProbeOutput(
+            answer="回答内容",
+            citations=["https://wrong.example/legacy"],
+            sources=sources,
+            source_capture_status=SourceCaptureStatus.CAPTURED,
+        )
     )
     adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
     attempt = await adapter.run("chatgpt", ProbeRequest(prompt="测试"))
     assert attempt.status == JobStatus.SUCCEEDED
     assert attempt.raw_answer == "回答内容"
-    assert attempt.citations[0].url == "https://example.com/source"
+    assert attempt.sources == sources
+    assert attempt.citations == citations_from_sources(sources)
+    assert attempt.source_capture_status == SourceCaptureStatus.CAPTURED
+    assert attempt.source_capture_diagnostic is None
     assert client.stopped == ["session-1"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_timeout_overrides_baidu_default(tmp_path: Path):
+    client = FakeBrowserClient(BrowserProbeOutput(answer="完整回答"))
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    await adapter.run("baidu", ProbeRequest(prompt="测试", options={"timeout": 12}))
+
+    assert client.last_timeout == 12
+
+
+@pytest.mark.asyncio
+async def test_browser_adapter_keeps_answer_success_when_source_capture_failed(tmp_path: Path):
+    client = FakeBrowserClient(
+        BrowserProbeOutput(
+            answer="回答内容",
+            source_capture_status=SourceCaptureStatus.FAILED,
+            source_capture_diagnostic="source panel changed",
+        )
+    )
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    attempt = await adapter.run("chatgpt", ProbeRequest(prompt="测试"))
+
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.raw_answer == "回答内容"
+    assert attempt.source_capture_status == SourceCaptureStatus.FAILED
+    assert attempt.source_capture_diagnostic == "source panel changed"
 
 
 @pytest.mark.asyncio
@@ -486,7 +1034,7 @@ async def test_browser_adapter_preserves_human_verification_diagnostic(tmp_path:
     )
     adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
 
-    attempt = await adapter.run("qwen", ProbeRequest(prompt="测试"))
+    attempt = await adapter.run("baidu", ProbeRequest(prompt="测试"))
 
     assert attempt.status == JobStatus.WAITING_FOR_LOGIN
     assert attempt.failure == FailureKind.LOGIN_REQUIRED
@@ -513,6 +1061,7 @@ async def test_browser_adapter_classifies_rate_limit_without_counting_success(tm
     assert attempt.status == JobStatus.FAILED
     assert attempt.failure == FailureKind.RATE_LIMITED
     assert attempt.raw_answer == ""
+    assert attempt.sources == []
 
 
 @pytest.mark.asyncio

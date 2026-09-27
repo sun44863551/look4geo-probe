@@ -24,9 +24,7 @@ cd "$project_root"
 .venv/bin/python -m pip install -e '.[dev]'
 
 mkdir -p vendor tools/promptfoo
-if [ ! -d vendor/AI-Search-Hub/.git ]; then
-  git clone https://github.com/minsight-ai-info/AI-Search-Hub.git vendor/AI-Search-Hub
-fi
+git submodule update --init --recursive vendor/AI-Search-Hub
 
 if [ ! -f tools/promptfoo/package.json ]; then
   npm init --yes --prefix tools/promptfoo >/dev/null
@@ -34,4 +32,3 @@ fi
 npm install --prefix tools/promptfoo promptfoo
 
 printf '%s\n' "Look4GEO dependencies installed. Run .venv/bin/probe doctor next."
-

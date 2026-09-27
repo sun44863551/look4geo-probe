@@ -2,7 +2,7 @@ platforms:
   doubao: {region: domestic, primary: browser_skill, fallback: ai_search_hub, citations: false}
   deepseek: {region: domestic, primary: browser_skill, citations: false}
   yuanbao: {region: domestic, primary: browser_skill, fallback: ai_search_hub, citations: true}
-  qwen: {region: domestic, primary: browser_skill, fallback: ai_search_hub, citations: true}
+  baidu: {region: domestic, primary: browser_skill, citations: true}
   chatgpt: {region: international, primary: browser_skill, citations: true}
   gemini: {region: international, primary: browser_skill, fallback: ai_search_hub, citations: true}
   perplexity: {region: international, primary: browser_skill, citations: true}

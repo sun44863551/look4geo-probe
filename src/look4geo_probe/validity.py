@@ -16,6 +16,11 @@ STUB_RE = re.compile(
     r"^(正在运行代码解释器|正在思考|正在搜索网络|搜索中|加载中|跳过)(?:…|\.\.\.)?(?:\s*跳过)?$",
     re.I,
 )
+LANDING_GREETING_RE = re.compile(
+    r"^(?:(?:The mic is yours|Let['’]s jump in|What['’]s the vibe|Ask away)"
+    r"(?:,\s*[^.!?]+)?|What should we focus on)[.!?]?$",
+    re.I,
+)
 TERMINAL_FAILURES = {"login_required", "rate_limited"}
 
 
@@ -27,7 +32,7 @@ def answer_is_valid_measurement(
     prompt: str, answer: str, *, min_answer_chars: int = 300
 ) -> bool:
     answer = answer.strip()
-    if not answer or STUB_RE.fullmatch(answer):
+    if not answer or STUB_RE.fullmatch(answer) or LANDING_GREETING_RE.fullmatch(answer):
         return False
     if _comparable(answer) == _comparable(prompt):
         return False

@@ -1,0 +1,11 @@
+{
+  "platform": "perplexity",
+  "observation": "longest prose answer contains cited anchors and an N 个来源 control; opened source list uses external anchor cards separate from follow-up suggestions",
+  "answer_links": [
+    {"url": "https://evidence.example/spec?id=42&utm_source=perplexity", "title": "Evidence"}
+  ],
+  "panel_cards": [
+    {"url": "https://evidence.example/spec?id=42#panel", "title": "Duplicate evidence", "snippet": "Same source card"},
+    {"url": "https://market.example/supplier", "title": "Supplier result", "snippet": "Visible search card"}
+  ]
+}

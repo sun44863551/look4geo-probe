@@ -1,9 +1,11 @@
+import asyncio
+
 import pytest
 
 from look4geo_probe.adapters.base import ProbeAdapter
 from look4geo_probe.adapters.registry import AdapterRegistry, AdapterChain, NoHealthyAdapter
 from look4geo_probe.adapters.types import AdapterHealth
-from look4geo_probe.models import JobStatus, PlatformAttempt, ProbeRequest
+from look4geo_probe.models import FailureKind, JobStatus, PlatformAttempt, ProbeRequest
 
 
 class NamedAdapter(ProbeAdapter):
@@ -31,11 +33,12 @@ def test_registry_rejects_platform_without_healthy_adapter():
 
 
 class ResultAdapter(ProbeAdapter):
-    def __init__(self, name, status, healthy=True):
+    def __init__(self, name, status, healthy=True, failure=None):
         self.name = name
         self.status = status
         self.healthy = healthy
         self.calls = 0
+        self.failure = failure
 
     async def health(self, platform):
         return AdapterHealth(self.healthy, self.name)
@@ -48,6 +51,7 @@ class ResultAdapter(ProbeAdapter):
             status=self.status,
             raw_answer="ok" if self.status == JobStatus.SUCCEEDED else "",
             diagnostic=None if self.status == JobStatus.SUCCEEDED else f"{self.name} failed",
+            failure=self.failure,
         )
 
     async def login(self, platform):
@@ -78,3 +82,62 @@ async def test_adapter_chain_skips_unhealthy_adapter():
 
     assert result.adapter == "ai_search_hub"
     assert primary.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_chain_preserves_final_timeout_failure_kind():
+    primary = ResultAdapter(
+        "browser_skill", JobStatus.FAILED, failure=FailureKind.TIMEOUT
+    )
+    fallback = ResultAdapter(
+        "ai_search_hub", JobStatus.FAILED, failure=FailureKind.TIMEOUT
+    )
+
+    result = await AdapterChain("gemini", [primary, fallback]).run(
+        "gemini", ProbeRequest(prompt="hello")
+    )
+
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_adapter_chain_stops_on_login_required_instead_of_waiting_for_fallback():
+    primary = ResultAdapter(
+        "browser_skill",
+        JobStatus.WAITING_FOR_LOGIN,
+        failure=FailureKind.LOGIN_REQUIRED,
+    )
+    fallback = ResultAdapter("ai_search_hub", JobStatus.SUCCEEDED)
+
+    result = await AdapterChain("doubao", [primary, fallback]).run(
+        "doubao", ProbeRequest(prompt="hello")
+    )
+
+    assert result.status == JobStatus.WAITING_FOR_LOGIN
+    assert result.failure == FailureKind.LOGIN_REQUIRED
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+class SlowAdapter(ResultAdapter):
+    async def run(self, platform, request):
+        self.calls += 1
+        await asyncio.sleep(1)
+        raise AssertionError("hard timeout did not stop slow adapter")
+
+
+@pytest.mark.asyncio
+async def test_adapter_chain_hard_timeout_falls_back_and_classifies_timeout():
+    primary = SlowAdapter("browser_skill", JobStatus.SUCCEEDED)
+    fallback = ResultAdapter("ai_search_hub", JobStatus.SUCCEEDED)
+    chain = AdapterChain(
+        "gemini", [primary, fallback], attempt_timeouts=[0.01, 0.1]
+    )
+
+    result = await chain.run("gemini", ProbeRequest(prompt="hello"))
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert result.adapter == "ai_search_hub"
+    assert "browser_skill: hard timeout" in (result.diagnostic or "")
+    assert primary.calls == fallback.calls == 1
