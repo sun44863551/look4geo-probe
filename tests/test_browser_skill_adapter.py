@@ -207,6 +207,10 @@ class DelayedAnswerClient(BskCliClient):
         return self.last_page
 
 
+class DoubaoPostSubmitLoginClient(DelayedAnswerClient):
+    pass
+
+
 class SourceCollectorClient(BskCliClient):
     def __init__(self, open_results, panel_pages=()):
         super().__init__("browser", poll_interval=0)
@@ -281,6 +285,37 @@ async def test_login_overlay_wins_over_hidden_composer():
 
     assert output.login_required is True
     assert output.failure is None
+
+
+@pytest.mark.asyncio
+async def test_doubao_dismisses_download_promotion_before_observing():
+    client = FillFallbackClient()
+
+    dismissed = await client._dismiss_blocking_overlays("session", "doubao")
+
+    assert dismissed is True
+    assert client.calls[-1][0] == "evaluate"
+    assert "下载豆包电脑版" in client.calls[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_doubao_post_submit_login_dialog_is_not_reported_as_timeout():
+    client = DoubaoPostSubmitLoginClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {
+                "answers": [],
+                "links": [],
+                "page_text": "登录以解锁更多功能 使用豆包或飞书账号登录 扫码登录",
+            },
+        ]
+    )
+
+    output = await client.probe("session", "doubao", "question", timeout=1)
+
+    assert output.login_required is True
+    assert output.failure is None
+    assert output.diagnostic == "login required after submission"
 
 
 def test_doubao_answer_boundary_targets_message_content():

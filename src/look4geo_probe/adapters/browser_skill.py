@@ -25,9 +25,13 @@ from ..validity import CONTAMINATION_RE
 PLATFORMS = {
     "doubao": {
         "url": "https://www.doubao.com/chat/?channel=sysceo&from_login=1",
-        "textbox": ("发送消息", "输入消息", "问问豆包"),
+        "textbox": ("发送消息", "输入消息", "问问豆包", "发消息..."),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "扫码登录"),
+        "blocking_login_markers": (
+            "登录以解锁更多功能",
+            "使用豆包或飞书账号登录",
+        ),
         "conversation_marker": "/chat/",
         "answer_selector": '[data-testid="message_text_content"]',
     },
@@ -394,6 +398,7 @@ class BskCliClient:
         navigation = await self._run_json(
             "navigate", config["url"], "--session", session_id, timeout=timeout
         )
+        await self._dismiss_blocking_overlays(session_id, platform)
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
         if page_requires_human_verification({"page_text": page_text}):
@@ -437,6 +442,14 @@ class BskCliClient:
                 return BrowserProbeOutput(
                     login_required=True,
                     diagnostic="human verification required",
+                )
+            if any(
+                marker in str(page.get("page_text") or "")
+                for marker in config.get("blocking_login_markers", ())
+            ):
+                return BrowserProbeOutput(
+                    login_required=True,
+                    diagnostic="login required after submission",
                 )
             if page_is_rate_limited(page):
                 return BrowserProbeOutput(
@@ -545,6 +558,22 @@ class BskCliClient:
                         return
         expression = f"document.execCommand('insertText', false, {json.dumps(prompt)})"
         await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
+
+    async def _dismiss_blocking_overlays(self, session_id: str, platform: str) -> bool:
+        if platform != "doubao":
+            return False
+        expression = (
+            "(() => { const dialogs = [...document.querySelectorAll('[role=dialog]')]; "
+            "const promo = dialogs.find(node => (node.innerText || '').includes('下载豆包电脑版')); "
+            "if (!promo) return false; const controls = [...promo.querySelectorAll('button')]; "
+            "const close = controls.find(node => /^(关闭|close)$/i.test(((node.getAttribute('aria-label') "
+            "|| '') + ' ' + (node.innerText || '')).trim())); if (!close) return false; "
+            "close.click(); return true; })()"
+        )
+        result = await self._run_json(
+            "evaluate", expression, "--session", session_id, timeout=30
+        )
+        return bool(self._result_value(result))
 
     async def _submit_prompt(
         self,
@@ -668,7 +697,8 @@ class BskCliClient:
             "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
             "generating:buttons.some(b => /停止生成|Stop generating|Stop responding/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
-            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit/i.test(bodyText)}; })()"
+            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit/i.test(bodyText),"
+            "page_text:bodyText}; })()"
         )
         result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
         value = self._result_value(result)

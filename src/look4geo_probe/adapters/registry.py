@@ -92,6 +92,11 @@ class AdapterChain(ProbeAdapter):
                         update={"diagnostic": "fallback after " + "; ".join(failures)}
                     )
                 return attempt
+            if attempt.failure in {
+                FailureKind.LOGIN_REQUIRED,
+                FailureKind.RATE_LIMITED,
+            }:
+                return attempt
             last_attempt = attempt
             failures.append(f"{adapter.name}: {attempt.diagnostic or attempt.status.value}")
         if last_attempt is not None:

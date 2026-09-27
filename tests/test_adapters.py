@@ -101,6 +101,25 @@ async def test_adapter_chain_preserves_final_timeout_failure_kind():
     assert result.failure == FailureKind.TIMEOUT
 
 
+@pytest.mark.asyncio
+async def test_adapter_chain_stops_on_login_required_instead_of_waiting_for_fallback():
+    primary = ResultAdapter(
+        "browser_skill",
+        JobStatus.WAITING_FOR_LOGIN,
+        failure=FailureKind.LOGIN_REQUIRED,
+    )
+    fallback = ResultAdapter("ai_search_hub", JobStatus.SUCCEEDED)
+
+    result = await AdapterChain("doubao", [primary, fallback]).run(
+        "doubao", ProbeRequest(prompt="hello")
+    )
+
+    assert result.status == JobStatus.WAITING_FOR_LOGIN
+    assert result.failure == FailureKind.LOGIN_REQUIRED
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
 class SlowAdapter(ResultAdapter):
     async def run(self, platform, request):
         self.calls += 1
