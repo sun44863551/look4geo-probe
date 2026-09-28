@@ -135,9 +135,16 @@ async def extract_gemini_sources(page) -> list[SourceRecord]:
 
 
 class GeminiPageDriver:
-    def __init__(self, page, *, poll_interval: float = 0.05):
+    def __init__(
+        self,
+        page,
+        *,
+        poll_interval: float = 0.05,
+        login_timeout: float = 300.0,
+    ):
         self.page = page
         self.poll_interval = poll_interval
+        self.login_timeout = login_timeout
 
     async def _body_text(self) -> str:
         try:
@@ -170,15 +177,24 @@ class GeminiPageDriver:
                 "status": "user_action_required",
                 "diagnostic": "Gemini navigation timed out",
             }
-        blocked = await self._blocking_result()
-        composer = self.page.locator(COMPOSER_SELECTOR).last
-        if blocked is None and await composer.count():
-            return {"platform": "gemini", "status": "succeeded"}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.login_timeout
+        blocked = None
+        while True:
+            blocked = await self._blocking_result()
+            composer = self.page.locator(COMPOSER_SELECTOR).last
+            if blocked is None and await composer.count():
+                return {"platform": "gemini", "status": "succeeded"}
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(self.poll_interval)
         return {
             "platform": "gemini",
             "status": "user_action_required",
             "diagnostic": (
-                blocked.diagnostic if blocked else "Complete Gemini login in the browser window"
+                blocked.diagnostic
+                if blocked
+                else "Gemini login was not completed before the window timed out"
             ),
         }
 

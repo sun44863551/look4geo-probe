@@ -134,6 +134,12 @@ class FakeLocator:
         if "message-content" in self.selector:
             return 1 if self.page.answers else 0
         if "contenteditable" in self.selector or "prompt for Gemini" in self.selector:
+            self.page.composer_checks += 1
+            if (
+                self.page.composer_after_checks is not None
+                and self.page.composer_checks >= self.page.composer_after_checks
+            ):
+                self.page.has_composer = True
             return 1 if self.page.has_composer else 0
         if "Send" in self.selector or "发送" in self.selector:
             return 1
@@ -185,6 +191,7 @@ class FakePage:
         answers=("answer", "answer"),
         detach_first_fill=False,
         navigation_timeout=False,
+        composer_after_checks=None,
     ):
         self.body = body
         self.has_composer = has_composer
@@ -194,6 +201,8 @@ class FakePage:
         self.answer_reads = list(answers)
         self.detach_first_fill = detach_first_fill
         self.navigation_timeout = navigation_timeout
+        self.composer_after_checks = composer_after_checks
+        self.composer_checks = 0
         self.composer = ""
         self.fill_calls = 0
         self.click_calls = 0
@@ -216,10 +225,24 @@ class FakePage:
 @pytest.mark.asyncio
 async def test_page_driver_login_succeeds_only_when_composer_is_visible(tmp_path):
     success = await GeminiPageDriver(FakePage()).login()
-    blocked = await GeminiPageDriver(FakePage(has_composer=False)).login()
+    blocked = await GeminiPageDriver(
+        FakePage(has_composer=False), poll_interval=0.001, login_timeout=0.01
+    ).login()
 
     assert success["status"] == "succeeded"
     assert blocked["status"] == "user_action_required"
+
+
+@pytest.mark.asyncio
+async def test_page_driver_login_waits_for_user_to_complete_visible_login():
+    page = FakePage(has_composer=False, composer_after_checks=3)
+
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, login_timeout=0.1
+    ).login()
+
+    assert result["status"] == "succeeded"
+    assert page.composer_checks >= 3
 
 
 @pytest.mark.asyncio
