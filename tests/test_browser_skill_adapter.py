@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+import look4geo_probe.adapters.browser_skill as browser_skill
 
 from look4geo_probe.adapters.browser_skill import (
     BskCliClient,
@@ -60,6 +61,12 @@ def test_grok_limit_reset_wall_is_rate_limited():
     assert page_is_rate_limited(
         {"page_text": "距离限制重置还剩 1小时 13分钟。等待或升级至 SuperGrok。"}
     )
+
+
+def test_grok_limit_diagnostic_preserves_visible_reset_hint():
+    assert browser_skill.rate_limit_diagnostic(
+        {"page_text": "距离限制重置还剩 1小时 13分钟。等待或升级至 SuperGrok。"}
+    ) == "platform quota or rate limit detected: 距离限制重置还剩 1小时 13分钟"
 
 
 def test_yuanbao_selects_full_answer_not_nested_source_url():

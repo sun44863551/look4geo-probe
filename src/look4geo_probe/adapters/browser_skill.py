@@ -330,6 +330,17 @@ def page_is_rate_limited(page: dict) -> bool:
     return bool(page.get("rate_limited")) or any(marker.casefold() in text for marker in RATE_LIMIT_MARKERS)
 
 
+def rate_limit_diagnostic(page: dict) -> str:
+    text = str(page.get("page_text") or "")
+    reset_hint = re.search(
+        r"距离限制重置还剩\s*\d+\s*小时(?:\s*\d+\s*分钟)?",
+        text,
+    )
+    if reset_hint:
+        return f"platform quota or rate limit detected: {reset_hint.group(0)}"
+    return "platform quota or rate limit detected"
+
+
 def page_requires_human_verification(page: dict) -> bool:
     text = str(page.get("page_text") or "")
     return any(marker in text for marker in HUMAN_VERIFICATION_MARKERS)
@@ -480,7 +491,7 @@ class BskCliClient:
             if page_is_rate_limited(page):
                 return BrowserProbeOutput(
                     failure=FailureKind.RATE_LIMITED,
-                    diagnostic="platform quota or rate limit detected",
+                    diagnostic=rate_limit_diagnostic(page),
                 )
             candidates = [str(value) for value in page.get("answers", [])]
             delta = answers_after_baseline(candidates, baseline)

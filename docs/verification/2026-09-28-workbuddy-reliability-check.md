@@ -29,6 +29,19 @@ optional and absent.
   instead of waiting until timeout. A successful-answer rerun remains pending
   until the platform limit resets.
 
+After the limit recovered, the guarded backfill used Q23 itself as the first
+check instead of spending an extra probe. Q23–Q25 succeeded with six cited
+sources each. Q26 then returned the free-tier wall; Q27–Q30 were not sent and
+were recorded as `suspended_quota`. The resulting state is Grok 25/30 and total
+115/120. With no reset countdown exposed on Q26, the next check is conservatively
+not before 2026-09-29 16:14 Asia/Shanghai.
+
+xAI's official FAQ says free Chat limits remain available separately from paid
+weekly usage and reset on their own schedule; it does not document a fixed free
+allowance, common reset clock, or IP/device accounting. Therefore this tool does
+not rotate accounts or network exits to evade the limit. References:
+https://docs.x.ai/grok/faq and https://x.ai/pricing.
+
 The first Gemini smoke used a prompt containing the reserved contamination term
 `Look4GEO`; the system correctly rejected that result. The neutral rerun above
 is the valid verification.
