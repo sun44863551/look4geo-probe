@@ -58,7 +58,7 @@ That failure is not a business "not mentioned" observation.
 - Both samples used `source_capture_status: captured`; links came from the
   answer DOM and were not inferred from model internals.
 
-### R=4 stability
+### Initial R=4 stability run
 
 - Job: `07ff136d-d7d5-456c-b1bc-23de8366e265`
 - Same neutral source question as R=2.
@@ -73,6 +73,30 @@ The job-level status was `succeeded` because fallback answers were available,
 but the native Camoufox acceptance result was only `2/4`. Fallback success must
 not be represented as native stability.
 
+### Post-fix strict R=4
+
+Investigation reproduced a silent Gemini submission failure: the composer could
+clear without creating a conversation, showing a generation control, or
+producing an answer. The old adapter treated composer clearing alone as send
+success and then waited until the 120-second answer timeout. Submission now
+requires a verified conversation URL, answer region, conversation structure,
+or generation-state change. An unverified clear causes the prompt to be filled
+again and retried, up to three sends.
+
+A subsequent run also exposed Gemini's transient response, `I seem to be
+encountering an error`. This platform error is no longer accepted as a business
+answer; the native adapter opens a new conversation and retries up to three
+times before returning `extraction_failed`.
+
+- Job: `ea81c59f-2f1d-416b-b249-3262b23396e1`
+- Question: same neutral Python 3.12.0 source question.
+- Native result: `4/4` succeeded with `camoufox_gemini`.
+- No BrowserSkill or AI-Search-Hub fallback was used.
+- All four answers reported October 2, 2023.
+- All four samples used `source_capture_status: captured` and contained visible
+  cited links from the answer DOM.
+- Per-sample completion time was approximately 11–14 seconds.
+
 ## Accounting and conclusion
 
 Login-required, timeout, send-failed, and extraction-failed samples are
@@ -81,8 +105,10 @@ and must never be encoded as mention `0`, citation `0`, or "not mentioned".
 Fallback answers may be retained as separately identified observations, but do
 not repair a failed native-adapter stability sample.
 
-**Conclusion: intermittent.** Gemini is usable through the private unified
-Look4GEO Probe and demonstrated real answer and citation extraction, including
-R=1 and R=2 success. It did not meet the strict native `4/4` stability gate:
-two R=4 samples timed out in the answer-completion phase and were satisfied only
-by the configured fallback chain.
+**Final conclusion: stable for this acceptance run.** Gemini is usable through
+the private unified Look4GEO Probe and demonstrated real answer and citation
+extraction for R=1, R=2, and a post-fix strict native R=4. The final R=4 met the
+`4/4` gate without fallback. This is evidence for the tested machine, account,
+question, and date; future platform UI changes or rate limits must still be
+reported as collection failures rather than converted to negative business
+observations.
