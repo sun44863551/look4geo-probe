@@ -348,29 +348,46 @@ class GeminiPageDriver:
 
 
 class CamoufoxRuntime:
-    def __init__(self, root: Path, headless: bool, browser: str | None):
+    def __init__(
+        self,
+        root: Path,
+        headless: bool,
+        browser: str | None,
+        disable_content_sandbox: bool = False,
+    ):
         self.root = Path(root)
         self.headless = headless
         self.browser = browser
+        self.disable_content_sandbox = disable_content_sandbox
 
     @property
     def cache_dir(self) -> Path:
         return self.root / "data/camoufox/cache"
 
     @contextmanager
-    def _local_cache(self):
-        previous = os.environ.get("XDG_CACHE_HOME")
+    def _local_environment(self):
+        previous_cache = os.environ.get("XDG_CACHE_HOME")
+        previous_sandbox = os.environ.get("MOZ_DISABLE_CONTENT_SANDBOX")
         os.environ["XDG_CACHE_HOME"] = str(self.cache_dir)
+        if self.disable_content_sandbox:
+            os.environ["MOZ_DISABLE_CONTENT_SANDBOX"] = "1"
         try:
             yield
         finally:
-            if previous is None:
+            if previous_cache is None:
                 os.environ.pop("XDG_CACHE_HOME", None)
             else:
-                os.environ["XDG_CACHE_HOME"] = previous
+                os.environ["XDG_CACHE_HOME"] = previous_cache
+            if self.disable_content_sandbox:
+                if previous_sandbox is None:
+                    os.environ.pop("MOZ_DISABLE_CONTENT_SANDBOX", None)
+                else:
+                    os.environ["MOZ_DISABLE_CONTENT_SANDBOX"] = previous_sandbox
 
     async def health(self, profile_dir: Path) -> AdapterHealth:
         env = {**os.environ, "XDG_CACHE_HOME": str(self.cache_dir)}
+        if self.disable_content_sandbox:
+            env["MOZ_DISABLE_CONTENT_SANDBOX"] = "1"
         try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -407,7 +424,7 @@ class CamoufoxRuntime:
 
     async def login(self, profile_dir: Path) -> dict:
         profile_dir.mkdir(parents=True, exist_ok=True)
-        with self._local_cache():
+        with self._local_environment():
             from camoufox.async_api import AsyncCamoufox
 
             async with AsyncCamoufox(**self._launch_options(profile_dir)) as context:
@@ -419,7 +436,7 @@ class CamoufoxRuntime:
     ) -> GeminiBrowserResult:
         profile_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        with self._local_cache():
+        with self._local_environment():
             from camoufox.async_api import AsyncCamoufox
 
             async with AsyncCamoufox(**self._launch_options(profile_dir)) as context:

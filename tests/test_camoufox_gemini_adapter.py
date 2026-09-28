@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -434,6 +435,22 @@ def test_camoufox_runtime_defaults_to_headed_macos_and_pinned_browser(tmp_path):
     assert runtime.root == tmp_path
     assert runtime.headless is False
     assert runtime.browser == "152.0.4-beta.30"
+
+
+def test_camoufox_runtime_scopes_and_restores_content_sandbox_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MOZ_DISABLE_CONTENT_SANDBOX", "original")
+    runtime = CamoufoxRuntime(
+        tmp_path,
+        headless=False,
+        browser="152.0.4-beta.30",
+        disable_content_sandbox=True,
+    )
+
+    with runtime._local_environment():
+        assert os.environ["XDG_CACHE_HOME"] == str(runtime.cache_dir)
+        assert os.environ["MOZ_DISABLE_CONTENT_SANDBOX"] == "1"
+
+    assert os.environ["MOZ_DISABLE_CONTENT_SANDBOX"] == "original"
 
 
 class ExtractionLocator:

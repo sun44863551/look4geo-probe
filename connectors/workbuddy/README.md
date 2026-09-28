@@ -38,6 +38,13 @@ in the visible browser window, and continue using the normal `run` command.
 `login_required` means the sample was not collected; it must never be recorded
 as "not mentioned" or included in measurement denominators.
 
+On this Mac mini, WorkBuddy runs Camoufox inside its own outer sandbox. If
+Firefox fails with `sandbox_init: Operation not permitted`, set
+`LOOK4GEO_CAMOUFOX_DISABLE_CONTENT_SANDBOX=1` in the private ignored
+`config/local.env`. The launcher applies `MOZ_DISABLE_CONTENT_SANDBOX=1` only
+while Camoufox is running and restores the previous process environment. Do
+not export it globally and do not use it on an untrusted host.
+
 Results keep answer status separate from source capture. `captured` means at
 least one visibly exposed source was collected, `none_exposed` means the UI
 showed none, and `failed` carries a `source_capture_diagnostic` without turning

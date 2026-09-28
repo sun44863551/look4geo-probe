@@ -90,6 +90,16 @@ def test_disabling_camoufox_restores_previous_gemini_chain(tmp_path, monkeypatch
     assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
 
 
+def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "browser-test")
+    monkeypatch.setenv("LOOK4GEO_CAMOUFOX_DISABLE_CONTENT_SANDBOX", "1")
+
+    adapters = build_adapters(tmp_path)
+    runtime = adapters["gemini"].adapters[0].runtime
+
+    assert runtime.disable_content_sandbox is True
+
+
 def test_local_connector_instructions_preserve_private_cli_contract():
     codex = (ROOT / "connectors/codex/SKILL.md").read_text(encoding="utf-8")
     workbuddy = (

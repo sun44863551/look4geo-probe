@@ -45,6 +45,9 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
                 browser=os.environ.get(
                     "LOOK4GEO_CAMOUFOX_BROWSER", "152.0.4-beta.30"
                 ),
+                disable_content_sandbox=os.environ.get(
+                    "LOOK4GEO_CAMOUFOX_DISABLE_CONTENT_SANDBOX", "0"
+                ) == "1",
             ),
             profile_dir,
             root / "data/camoufox/artifacts",
