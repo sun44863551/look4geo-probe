@@ -135,6 +135,13 @@ def test_textbox_lookup_accepts_current_logged_in_doubao_label():
     ) == "@e63"
 
 
+def test_textbox_lookup_accepts_current_grok_label():
+    page = '@e22 textbox "Ask Grok anything" [empty]'
+    assert BskCliClient._find_textbox_ref(
+        page, PLATFORMS["grok"]["textbox"]
+    ) == "@e22"
+
+
 def test_bsk_error_detail_reads_json_message_from_stdout():
     stdout = b'{"code":"cdp_failed","message":"fill target changed"}'
     assert command_error_detail(stdout, b"") == "cdp_failed: fill target changed"
@@ -155,6 +162,37 @@ class FillFallbackClient(BskCliClient):
 class GeminiFilledDespiteErrorClient(FillFallbackClient):
     async def _composer_text(self, session_id, selector):
         return "hello"
+
+
+class GrokRerenderClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+        self.value = ""
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "fill" and args[1] == "@stale":
+            raise RuntimeError("fill target changed or lost focus before typing")
+        if args[0] == "observe":
+            return {"text": '@e22 textbox "Ask Grok anything" [empty]'}
+        if args[0] == "fill" and args[1] == "@e22":
+            self.value = args[3]
+            return {"value": True}
+        return {"value": True}
+
+    async def _composer_text(self, session_id, selector):
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_grok_reobserves_and_verifies_prompt_after_target_loss():
+    client = GrokRerenderClient()
+
+    await client._enter_prompt("session", "grok", "@stale", "hello grok")
+
+    assert client.value == "hello grok"
+    assert any(call[0] == "observe" for call in client.calls)
 
 
 class ComposerStateClient(BskCliClient):

@@ -101,7 +101,7 @@ PLATFORMS = {
     },
     "grok": {
         "url": "https://grok.com/",
-        "textbox": ("Ask anything", "向 Grok 提问", "输入消息"),
+        "textbox": ("Ask Grok anything", "Ask anything", "向 Grok 提问", "输入消息"),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
         "login_markers": ("登录", "Sign in", "Continue with X", "Continue with Google"),
         "conversation_marker": "/c/",
@@ -542,6 +542,38 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "grok":
+            candidate_ref = textbox_ref
+            selector = PLATFORMS[platform]["composer_selector"]
+            for _ in range(3):
+                if candidate_ref is None:
+                    observation = await self._run_json(
+                        "observe", "--session", session_id, timeout=timeout
+                    )
+                    candidate_ref = self._find_textbox_ref(
+                        str(observation.get("text", ""))
+                        if isinstance(observation, dict)
+                        else "",
+                        PLATFORMS[platform]["textbox"],
+                    )
+                try:
+                    if candidate_ref:
+                        await self._run_json(
+                            "fill", candidate_ref, "--value", prompt,
+                            "--session", session_id, timeout=timeout,
+                        )
+                    else:
+                        await self._run_json(
+                            "fill", "--selector", selector, "--value", prompt,
+                            "--session", session_id, timeout=timeout,
+                        )
+                    if (await self._composer_text(session_id, selector)).strip() == prompt.strip():
+                        return
+                except RuntimeError:
+                    pass
+                candidate_ref = None
+            raise RuntimeError("Grok prompt entry could not be verified after 3 attempts")
+
         if textbox_ref:
             try:
                 await self._run_json(

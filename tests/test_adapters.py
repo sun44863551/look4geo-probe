@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from look4geo_probe.adapters.base import ProbeAdapter
 from look4geo_probe.adapters.registry import AdapterRegistry, AdapterChain, NoHealthyAdapter
@@ -145,6 +146,27 @@ class SlowAdapter(ResultAdapter):
         self.calls += 1
         await asyncio.sleep(1)
         raise AssertionError("hard timeout did not stop slow adapter")
+
+
+class PlaywrightTimeoutAdapter(ResultAdapter):
+    async def run(self, platform, request):
+        self.calls += 1
+        raise PlaywrightTimeoutError("browser launch timed out")
+
+
+@pytest.mark.asyncio
+async def test_adapter_chain_playwright_timeout_falls_back_and_classifies_timeout():
+    primary = PlaywrightTimeoutAdapter("camoufox_gemini", JobStatus.SUCCEEDED)
+    fallback = ResultAdapter("browser_skill", JobStatus.SUCCEEDED)
+
+    result = await AdapterChain("gemini", [primary, fallback]).run(
+        "gemini", ProbeRequest(prompt="hello")
+    )
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert result.adapter == "browser_skill"
+    assert "camoufox_gemini: browser timeout" in (result.diagnostic or "")
+    assert primary.calls == fallback.calls == 1
 
 
 @pytest.mark.asyncio

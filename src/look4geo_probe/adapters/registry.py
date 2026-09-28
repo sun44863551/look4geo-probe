@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
@@ -78,13 +79,20 @@ class AdapterChain(ProbeAdapter):
                     if hard_timeout is not None
                     else await operation
                 )
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, PlaywrightTimeoutError) as error:
+                timeout_detail = (
+                    f"hard timeout after {hard_timeout:g}s"
+                    if isinstance(error, asyncio.TimeoutError)
+                    and not isinstance(error, PlaywrightTimeoutError)
+                    and hard_timeout is not None
+                    else "browser timeout"
+                )
                 attempt = PlatformAttempt(
                     platform=platform,
                     adapter=adapter.name,
                     status=JobStatus.FAILED,
                     failure=FailureKind.TIMEOUT,
-                    diagnostic=f"hard timeout after {hard_timeout:g}s",
+                    diagnostic=timeout_detail,
                 )
             if attempt.status == JobStatus.SUCCEEDED:
                 if failures:
