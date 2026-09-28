@@ -45,6 +45,11 @@ LOGIN_MARKERS = (
     "异常流量",
 )
 RATE_LIMIT_MARKERS = ("reached your limit", "rate limit", "try again later", "达到上限")
+TRANSIENT_ANSWER_MARKERS = (
+    "i seem to be encountering an error",
+    "something went wrong",
+    "there was an error generating a response",
+)
 SOURCE_PANEL_SELECTOR = "source-panel a[href], sources-list a[href]"
 EXCLUDED_SOURCE_DOMAINS = frozenset({"gemini.google.com", "google.com"})
 
@@ -319,7 +324,21 @@ class GeminiPageDriver:
     ) -> GeminiBrowserResult:
         try:
             async with asyncio.timeout(timeout):
-                return await self._probe(prompt, artifact_dir)
+                for _ in range(3):
+                    result = await self._probe(prompt, artifact_dir)
+                    if not (
+                        result.status == JobStatus.SUCCEEDED
+                        and any(
+                            marker in result.answer.casefold()
+                            for marker in TRANSIENT_ANSWER_MARKERS
+                        )
+                    ):
+                        return result
+                return GeminiBrowserResult(
+                    status=JobStatus.FAILED,
+                    failure=FailureKind.EXTRACTION_FAILED,
+                    diagnostic="Gemini returned a transient platform error 3 times",
+                )
         except TimeoutError:
             return GeminiBrowserResult(
                 status=JobStatus.FAILED,

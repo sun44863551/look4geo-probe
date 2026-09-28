@@ -177,6 +177,10 @@ class FakeLocator:
         if self.page.click_calls < self.page.transition_at:
             return
         self.page.sent = True
+        if self.page.responses:
+            response = self.page.responses.pop(0)
+            self.page.answers = [response]
+            self.page.answer_reads = [response, response]
         if self.page.transition == "composer":
             self.page.composer = ""
         elif self.page.transition == "url":
@@ -208,6 +212,7 @@ class FakePage:
         send_click_fails=False,
         enter_sends=False,
         silent_clear_attempts=0,
+        responses=(),
     ):
         self.body = body
         self.has_composer = has_composer
@@ -222,6 +227,7 @@ class FakePage:
         self.send_click_fails = send_click_fails
         self.enter_sends = enter_sends
         self.silent_clear_attempts = silent_clear_attempts
+        self.responses = list(responses)
         self.composer = ""
         self.fill_calls = 0
         self.click_calls = 0
@@ -334,6 +340,24 @@ async def test_page_driver_rejects_composer_clear_without_submission(tmp_path):
     assert result.status == JobStatus.FAILED
     assert result.failure == FailureKind.SEND_FAILED
     assert page.fill_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_page_driver_retries_transient_gemini_error_answer(tmp_path):
+    page = FakePage(
+        responses=(
+            "I seem to be encountering an error. Can I try something else for you?",
+            "Python 3.12.0 was released on October 2, 2023.",
+        )
+    )
+
+    result = await GeminiPageDriver(page, poll_interval=0.001).probe(
+        "When was Python 3.12.0 released?", 1, tmp_path
+    )
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert result.answer == "Python 3.12.0 was released on October 2, 2023."
+    assert page.click_calls == 2
 
 
 @pytest.mark.asyncio
