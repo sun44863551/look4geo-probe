@@ -167,8 +167,10 @@ class FakeLocator:
             return self.page.answers[-1]
         return self.page.composer
 
-    async def click(self):
+    async def click(self, **kwargs):
         self.page.click_calls += 1
+        if self.page.send_click_fails:
+            raise TimeoutError("send button unavailable")
         if self.page.click_calls < self.page.transition_at:
             return
         self.page.sent = True
@@ -178,6 +180,12 @@ class FakeLocator:
             self.page.url = "https://gemini.google.com/app/conversation"
         elif self.page.transition == "turn":
             self.page.turns += 1
+
+    async def press(self, key):
+        self.page.press_calls += 1
+        if key == "Enter" and self.page.enter_sends:
+            self.page.sent = True
+            self.page.composer = ""
 
 
 class FakePage:
@@ -192,6 +200,8 @@ class FakePage:
         detach_first_fill=False,
         navigation_timeout=False,
         composer_after_checks=None,
+        send_click_fails=False,
+        enter_sends=False,
     ):
         self.body = body
         self.has_composer = has_composer
@@ -203,9 +213,12 @@ class FakePage:
         self.navigation_timeout = navigation_timeout
         self.composer_after_checks = composer_after_checks
         self.composer_checks = 0
+        self.send_click_fails = send_click_fails
+        self.enter_sends = enter_sends
         self.composer = ""
         self.fill_calls = 0
         self.click_calls = 0
+        self.press_calls = 0
         self.locator_calls: list[str] = []
         self.sent = False
         self.stop_seen = False
@@ -338,6 +351,18 @@ async def test_page_driver_waits_for_authenticated_composer_to_load(tmp_path):
 
     assert result.status == JobStatus.SUCCEEDED
     assert page.composer_checks >= 3
+
+
+@pytest.mark.asyncio
+async def test_page_driver_falls_back_to_enter_when_send_button_is_unavailable(
+    tmp_path,
+):
+    page = FakePage(send_click_fails=True, enter_sends=True)
+
+    result = await GeminiPageDriver(page).probe("hello", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.press_calls == 1
 
 
 def test_camoufox_runtime_defaults_to_headed_macos_and_pinned_browser(tmp_path):

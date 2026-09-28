@@ -224,7 +224,14 @@ class GeminiPageDriver:
         before_url = self.page.url
         before_turns = await self.page.locator(TURN_SELECTOR).count()
         for _ in range(3):
-            await self.page.locator(SEND_SELECTOR).last.click()
+            try:
+                await self.page.locator(SEND_SELECTOR).last.click(timeout=3000)
+            except Exception:
+                try:
+                    await self.page.locator(COMPOSER_SELECTOR).last.press("Enter")
+                except Exception:
+                    await asyncio.sleep(self.poll_interval)
+                    continue
             composer = await self.page.locator(COMPOSER_SELECTOR).last.inner_text()
             if not composer.strip():
                 return True
