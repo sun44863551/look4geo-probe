@@ -171,12 +171,16 @@ class FakeLocator:
         self.page.click_calls += 1
         if self.page.send_click_fails:
             raise TimeoutError("send button unavailable")
+        if self.page.click_calls <= self.page.silent_clear_attempts:
+            self.page.composer = ""
+            return
         if self.page.click_calls < self.page.transition_at:
             return
         self.page.sent = True
         if self.page.transition == "composer":
             self.page.composer = ""
         elif self.page.transition == "url":
+            self.page.composer = ""
             self.page.url = "https://gemini.google.com/app/conversation"
         elif self.page.transition == "turn":
             self.page.turns += 1
@@ -186,6 +190,7 @@ class FakeLocator:
         if key == "Enter" and self.page.enter_sends:
             self.page.sent = True
             self.page.composer = ""
+            self.page.url = "https://gemini.google.com/app/conversation"
 
 
 class FakePage:
@@ -194,7 +199,7 @@ class FakePage:
         *,
         body="",
         has_composer=True,
-        transition="composer",
+        transition="url",
         transition_at=1,
         answers=("answer", "answer"),
         detach_first_fill=False,
@@ -202,6 +207,7 @@ class FakePage:
         composer_after_checks=None,
         send_click_fails=False,
         enter_sends=False,
+        silent_clear_attempts=0,
     ):
         self.body = body
         self.has_composer = has_composer
@@ -215,6 +221,7 @@ class FakePage:
         self.composer_checks = 0
         self.send_click_fails = send_click_fails
         self.enter_sends = enter_sends
+        self.silent_clear_attempts = silent_clear_attempts
         self.composer = ""
         self.fill_calls = 0
         self.click_calls = 0
@@ -285,20 +292,48 @@ async def test_page_driver_re_resolves_detached_composer_and_verifies_prompt(tmp
 async def test_page_driver_retries_send_three_times(tmp_path):
     page = FakePage(transition_at=3)
 
-    result = await GeminiPageDriver(page).probe("hello", 1, tmp_path)
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, send_transition_timeout=0.01
+    ).probe("hello", 1, tmp_path)
 
     assert result.status == JobStatus.SUCCEEDED
     assert page.click_calls == 3
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transition", ["composer", "stop", "url", "turn"])
+@pytest.mark.parametrize("transition", ["stop", "url", "turn"])
 async def test_page_driver_accepts_verified_send_transitions(tmp_path, transition):
     result = await GeminiPageDriver(FakePage(transition=transition)).probe(
         "hello", 1, tmp_path
     )
 
     assert result.status == JobStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_page_driver_refills_after_silent_composer_clear(tmp_path):
+    page = FakePage(transition="url", silent_clear_attempts=1)
+
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, send_transition_timeout=0.01
+    ).probe("hello", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.fill_calls == 2
+    assert page.click_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_page_driver_rejects_composer_clear_without_submission(tmp_path):
+    page = FakePage(transition="url", silent_clear_attempts=3)
+
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, send_transition_timeout=0.01
+    ).probe("hello", 1, tmp_path)
+
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.SEND_FAILED
+    assert page.fill_calls == 3
 
 
 @pytest.mark.asyncio
@@ -334,7 +369,9 @@ async def test_page_driver_classifies_navigation_timeout(tmp_path):
 async def test_page_driver_fails_after_three_unchanged_send_attempts(tmp_path):
     page = FakePage(transition_at=99)
 
-    result = await GeminiPageDriver(page).probe("hello", 1, tmp_path)
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, send_transition_timeout=0.01
+    ).probe("hello", 1, tmp_path)
 
     assert result.status == JobStatus.FAILED
     assert result.failure == FailureKind.SEND_FAILED

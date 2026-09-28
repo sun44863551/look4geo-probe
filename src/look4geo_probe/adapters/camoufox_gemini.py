@@ -142,10 +142,12 @@ class GeminiPageDriver:
         *,
         poll_interval: float = 0.05,
         login_timeout: float = 300.0,
+        send_transition_timeout: float = 10.0,
     ):
         self.page = page
         self.poll_interval = poll_interval
         self.login_timeout = login_timeout
+        self.send_transition_timeout = send_transition_timeout
 
     async def _body_text(self) -> str:
         try:
@@ -220,28 +222,45 @@ class GeminiPageDriver:
                 return False
             await asyncio.sleep(self.poll_interval)
 
-    async def _send(self) -> bool:
-        before_url = self.page.url
-        before_turns = await self.page.locator(TURN_SELECTOR).count()
+    async def _wait_for_submission(
+        self, before_url: str, before_turns: int, before_answers: int
+    ) -> bool:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.send_transition_timeout
+        while True:
+            if self.page.url != before_url:
+                return True
+            if await self.page.locator(STOP_SELECTOR).count():
+                return True
+            if await self.page.locator(TURN_SELECTOR).count() > before_turns:
+                return True
+            if await self.page.locator(ANSWER_SELECTOR).count() > before_answers:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(self.poll_interval)
+
+    async def _send(self, prompt: str) -> bool:
         for _ in range(3):
+            composer = self.page.locator(COMPOSER_SELECTOR).last
+            current = (await composer.inner_text()).strip()
+            if current != prompt and not await self._fill_prompt(prompt):
+                continue
+            before_url = self.page.url
+            before_turns = await self.page.locator(TURN_SELECTOR).count()
+            before_answers = await self.page.locator(ANSWER_SELECTOR).count()
             try:
                 await self.page.locator(SEND_SELECTOR).last.click(timeout=3000)
             except Exception:
                 try:
-                    await self.page.locator(COMPOSER_SELECTOR).last.press("Enter")
+                    await composer.press("Enter")
                 except Exception:
                     await asyncio.sleep(self.poll_interval)
                     continue
-            composer = await self.page.locator(COMPOSER_SELECTOR).last.inner_text()
-            if not composer.strip():
+            if await self._wait_for_submission(
+                before_url, before_turns, before_answers
+            ):
                 return True
-            if await self.page.locator(STOP_SELECTOR).count():
-                return True
-            if self.page.url != before_url:
-                return True
-            if await self.page.locator(TURN_SELECTOR).count() > before_turns:
-                return True
-            await asyncio.sleep(self.poll_interval)
         return False
 
     async def _wait_for_answer(self) -> str:
@@ -272,7 +291,7 @@ class GeminiPageDriver:
                 failure=FailureKind.SEND_FAILED,
                 diagnostic="Gemini prompt entry could not be verified",
             )
-        if not await self._send():
+        if not await self._send(prompt):
             return GeminiBrowserResult(
                 status=JobStatus.FAILED,
                 failure=FailureKind.SEND_FAILED,
