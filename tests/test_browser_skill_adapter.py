@@ -11,6 +11,7 @@ from look4geo_probe.adapters.browser_skill import (
     answer_links_for_text,
     extract_text_urls,
     normalize_for_browser,
+    page_is_rate_limited,
     submission_confirmed,
     select_main_answer,
     command_error_detail,
@@ -53,6 +54,12 @@ def test_perplexity_selects_longest_answer_not_follow_up():
         ["Short follow-up?", "This is the complete researched answer with suppliers and evidence."],
     )
     assert answer == "This is the complete researched answer with suppliers and evidence."
+
+
+def test_grok_limit_reset_wall_is_rate_limited():
+    assert page_is_rate_limited(
+        {"page_text": "距离限制重置还剩 1小时 13分钟。等待或升级至 SuperGrok。"}
+    )
 
 
 def test_yuanbao_selects_full_answer_not_nested_source_url():
@@ -185,6 +192,45 @@ class GrokRerenderClient(BskCliClient):
         return self.value
 
 
+class GrokExecFallbackClient(GrokRerenderClient):
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "fill":
+            raise RuntimeError("fill target changed or lost focus before typing")
+        if args[0] == "evaluate":
+            self.value = "hello grok"
+            return {"value": self.value}
+        return {"text": '@e22 textbox "Ask Grok anything" [empty]'}
+
+
+class GrokSelectorFallbackClient(GrokRerenderClient):
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "fill" and str(args[1]).startswith("@"):
+            raise RuntimeError("fill target changed or lost focus before typing")
+        if args[0] == "fill" and args[1] == "--selector":
+            self.value = args[4]
+            return {"value": True}
+        return {"text": '@e22 textbox "Ask Grok anything" [empty]'}
+
+
+class GrokNativeKeysClient(GrokRerenderClient):
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "fill":
+            raise RuntimeError("fill target changed or lost focus before typing")
+        if args[0] == "press":
+            key = args[1]
+            if key == "Backspace":
+                self.value = ""
+            elif key not in {"Meta+A"}:
+                self.value += " " if key == "Space" else key
+            return {"value": True}
+        if args[0] == "evaluate":
+            raise AssertionError("DOM insertion should not run after native keys succeed")
+        return {"text": '@e22 textbox "Ask Grok anything" [empty]'}
+
+
 @pytest.mark.asyncio
 async def test_grok_reobserves_and_verifies_prompt_after_target_loss():
     client = GrokRerenderClient()
@@ -193,6 +239,48 @@ async def test_grok_reobserves_and_verifies_prompt_after_target_loss():
 
     assert client.value == "hello grok"
     assert any(call[0] == "observe" for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_grok_uses_dom_insertion_when_fill_target_keeps_rerendering():
+    client = GrokExecFallbackClient()
+
+    await client._enter_prompt("session", "grok", "@stale", "hello grok")
+
+    assert client.value == "hello grok"
+    assert any(call[0] == "evaluate" for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_grok_retries_fill_with_stable_selector_before_dom_insertion():
+    client = GrokSelectorFallbackClient()
+
+    await client._enter_prompt("session", "grok", "@stale", "hello grok")
+
+    assert client.value == "hello grok"
+    assert any(call[:2] == ("fill", "--selector") for call in client.calls)
+    assert not any(call[0] == "evaluate" for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_grok_uses_native_key_events_when_all_fill_targets_rerender():
+    client = GrokNativeKeysClient()
+
+    await client._enter_prompt("session", "grok", "@stale", "Hi 你")
+
+    assert client.value == "Hi 你"
+    assert any(call[:2] == ("press", "Space") for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_grok_submits_through_stable_selector_not_stale_ref():
+    client = FillFallbackClient()
+
+    await client._submit_prompt("session", "grok", "@stale")
+
+    assert client.calls[-1][0:2] == ("press", "Enter")
+    assert "--selector" in client.calls[-1]
+    assert "@stale" not in client.calls[-1]
 
 
 class ComposerStateClient(BskCliClient):

@@ -77,7 +77,7 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
     assert adapters["deepseek"].adapter_names == ["browser_skill"]
     assert adapters["yuanbao"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["perplexity"].adapter_names == ["browser_skill"]
-    assert adapters["grok"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["grok"].adapter_names == ["browser_skill"]
     assert "qwen" not in adapters
 
 

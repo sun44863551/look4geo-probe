@@ -29,7 +29,9 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         "chatgpt": [browser],
         "gemini": [browser, ai_hub],
         "perplexity": [browser],
-        "grok": [browser, ai_hub],
+        # AI-Search-Hub resets a large debug profile during Grok fallback, which
+        # is unsafe inside WorkBuddy's guarded filesystem. Keep Grok local-only.
+        "grok": [browser],
     }
     if parse_camoufox_mode(os.environ.get("LOOK4GEO_CAMOUFOX_ENABLED")) != "disabled":
         profile_dir = Path(

@@ -102,7 +102,10 @@ PLATFORMS = {
     "grok": {
         "url": "https://grok.com/",
         "textbox": ("Ask Grok anything", "Ask anything", "向 Grok 提问", "输入消息"),
-        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
+        "composer_selector": (
+            'div[contenteditable="true"][aria-label="Ask Grok anything"], '
+            'div[role="textbox"], textarea'
+        ),
         "login_markers": ("登录", "Sign in", "Continue with X", "Continue with Google"),
         "conversation_marker": "/c/",
         "answer_selector": '[data-message-author-role="assistant"], [class*="assistant"], [class*="response"], [class*="markdown"]',
@@ -230,6 +233,8 @@ RATE_LIMIT_MARKERS = (
     "已达到免费搜索次数上限",
     "使用权限将在几小时后重置",
     "free searches limit",
+    "距离限制重置还剩",
+    "upgrade to supergrok",
 )
 HUMAN_VERIFICATION_MARKERS = (
     "请确认你的年龄以继续",
@@ -579,6 +584,67 @@ class BskCliClient:
                         return
                 except RuntimeError:
                     pass
+                try:
+                    await self._run_json(
+                        "fill",
+                        "--selector",
+                        selector,
+                        "--value",
+                        prompt,
+                        "--session",
+                        session_id,
+                        timeout=timeout,
+                    )
+                    if (
+                        await self._composer_text(session_id, selector)
+                    ).strip() == prompt.strip():
+                        return
+                except RuntimeError:
+                    pass
+                try:
+                    await self._run_json(
+                        "press", "Meta+A", "--selector", selector,
+                        "--session", session_id, timeout=timeout,
+                    )
+                    await self._run_json(
+                        "press", "Backspace", "--selector", selector,
+                        "--session", session_id, timeout=timeout,
+                    )
+                    for character in prompt:
+                        key = (
+                            "Space" if character == " "
+                            else "Shift+Enter" if character == "\n"
+                            else "Shift+=" if character == "+"
+                            else character
+                        )
+                        await self._run_json(
+                            "press", key, "--selector", selector,
+                            "--session", session_id, timeout=timeout,
+                        )
+                    if (
+                        await self._composer_text(session_id, selector)
+                    ).strip() == prompt.strip():
+                        return
+                except RuntimeError:
+                    pass
+                insertion = await self._run_json(
+                    "evaluate",
+                    "(() => { const nodes = [...document.querySelectorAll("
+                    + json.dumps(selector)
+                    + ")]; const target = nodes.find(node => "
+                    "node.getAttribute('aria-label') === 'Ask Grok anything') || "
+                    "nodes.find(node => node.getClientRects().length); "
+                    "if (!target) return ''; target.focus(); "
+                    "document.execCommand('selectAll', false, null); "
+                    "document.execCommand('insertText', false, "
+                    + json.dumps(prompt)
+                    + "); return target.innerText || target.textContent || target.value || ''; })()",
+                    "--session",
+                    session_id,
+                    timeout=timeout,
+                )
+                if str(self._result_value(insertion) or "").strip() == prompt.strip():
+                    return
                 candidate_ref = None
             raise RuntimeError("Grok prompt entry could not be verified after 3 attempts")
 
@@ -702,6 +768,17 @@ class BskCliClient:
                 timeout=timeout,
             )
             return
+        if platform == "grok":
+            await self._run_json(
+                "press",
+                "Enter",
+                "--selector",
+                PLATFORMS[platform]["composer_selector"],
+                "--session",
+                session_id,
+                timeout=timeout,
+            )
+            return
         if textbox_ref:
             await self._run_json(
                 "press", "Enter", "--ref", textbox_ref, "--session", session_id, timeout=timeout
@@ -797,7 +874,7 @@ class BskCliClient:
             "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
             "generating:buttons.some(b => /停止生成|Stop generating|Stop responding/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
-            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit/i.test(bodyText),"
+            "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit|距离限制重置还剩|upgrade to supergrok/i.test(bodyText),"
             "page_text:bodyText}; })()"
         )
         result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
