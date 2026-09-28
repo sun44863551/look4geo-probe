@@ -181,6 +181,7 @@ PLATFORMS["gemini"].update(
 )
 PLATFORMS["perplexity"].update(
     {
+        "answer_sources_only": True,
         "source_trigger_labels": ("个来源", "来源", "Sources"),
         "source_panel_selectors": ('[class*="max-h-[300px]"]',),
         "source_panel_labels": ("来源", "Sources", "链接"),
@@ -433,6 +434,13 @@ class BskCliClient:
             ):
                 return BrowserProbeOutput(login_required=True)
             raise RuntimeError(f"message textbox not found for {platform}")
+        if platform == "perplexity" and not await self._ensure_perplexity_standard_search(
+            session_id
+        ):
+            return BrowserProbeOutput(
+                failure=FailureKind.SEND_FAILED,
+                diagnostic="Perplexity standard search mode could not be confirmed",
+            )
 
         baseline_page = await self._answer_page(session_id, config["answer_selector"])
         baseline = [str(value) for value in baseline_page.get("answers", [])]
@@ -755,6 +763,25 @@ class BskCliClient:
         value = self._result_value(result)
         return str(value or "")
 
+    async def _ensure_perplexity_standard_search(self, session_id: str) -> bool:
+        expression = (
+            "(() => { const buttons = [...document.querySelectorAll('button')]; "
+            "const standard = buttons.find(button => "
+            "/^(搜索|Search)$/i.test((button.innerText || '').trim())); "
+            "if (!standard) return {found:false, active:false}; "
+            "if (standard.getAttribute('aria-pressed') !== 'true') standard.click(); "
+            "return {found:true, active:standard.getAttribute('aria-pressed') === 'true'}; })()"
+        )
+        for _ in range(3):
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            state = self._result_value(result)
+            if isinstance(state, dict) and state.get("found") and state.get("active"):
+                return True
+            await asyncio.sleep(self.poll_interval)
+        return False
+
     async def _answer_page(self, session_id: str, selector: str) -> dict:
         expression = (
             "(() => { const nodes = [...document.querySelectorAll("
@@ -795,6 +822,16 @@ class BskCliClient:
             )
             if record is not None:
                 candidates.append(record)
+
+        if config.get("answer_sources_only"):
+            sources = merge_sources(candidates)
+            return (
+                sources,
+                SourceCaptureStatus.CAPTURED
+                if sources
+                else SourceCaptureStatus.NONE_EXPOSED,
+                None,
+            )
 
         has_source_rule = bool(
             config["source_trigger_labels"] or config["source_trigger_selectors"]

@@ -51,5 +51,15 @@ showed none, and `failed` carries a `source_capture_diagnostic` without turning
 a successful answer into a failed answer. Source roles distinguish links
 `cited` in the answer from links merely `surfaced` in a visible source panel.
 
+Perplexity runs are pinned to the ordinary `Search` / `搜索` mode and must
+confirm that mode before sending. They do not intentionally use Pro Search or
+Computer. Perplexity's current Free-plan documentation describes basic searches
+as practically unlimited and separately limits Pro Search to 3/day; it does not
+publish a guaranteed reset clock. If the site nevertheless returns a quota wall,
+the WorkBuddy batch marks later Perplexity cells `suspended_quota`, waits at least
+until the next-day check time, and resumes only after a real probe confirms that
+search is available. A suspended cell is uncollected, never a negative mention.
+See https://www.perplexity.ai/help-center/en/articles/11187416-which-perplexity-subscription-plan-is-right-for-you
+
 All browser credentials remain in the user's Chrome profile. Probe jobs and
 results remain in the local SQLite database under `data/`.

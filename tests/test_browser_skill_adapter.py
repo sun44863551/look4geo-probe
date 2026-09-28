@@ -206,6 +206,19 @@ class ComposerStateClient(BskCliClient):
         return {"value": next(self.values)}
 
 
+@pytest.mark.asyncio
+async def test_perplexity_standard_search_mode_must_be_confirmed():
+    client = ComposerStateClient(
+        [
+            {"found": True, "active": False},
+            {"found": True, "active": True},
+        ]
+    )
+
+    assert await client._ensure_perplexity_standard_search("session") is True
+    assert len(client.calls) == 2
+
+
 class GeminiSubmitClient(BskCliClient):
     def __init__(self, states):
         super().__init__("browser", poll_interval=0)
@@ -267,6 +280,9 @@ class DelayedAnswerClient(BskCliClient):
 
     async def _enter_prompt(self, *args, **kwargs):
         return None
+
+    async def _ensure_perplexity_standard_search(self, session_id):
+        return True
 
     async def _wait_submission_ready(self, *args, **kwargs):
         return True
@@ -552,6 +568,29 @@ async def test_answer_links_are_cited_answer_dom_sources(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_perplexity_collects_only_current_answer_citations(monkeypatch):
+    configure_source_panel(monkeypatch, "perplexity")
+    config = {**PLATFORMS["perplexity"], "answer_sources_only": True}
+    monkeypatch.setitem(PLATFORMS, "perplexity", config)
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}],
+        [[{"url": "https://stale.example/old", "title": "Old session"}]],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session",
+        "perplexity",
+        [{"url": "https://current.example/cited", "title": "Current citation"}],
+    )
+
+    assert [source.url for source in sources] == ["https://current.example/cited"]
+    assert all(source.source_role == SourceRole.CITED for source in sources)
+    assert client.open_calls == 0
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
 async def test_missing_source_trigger_without_answer_links_is_none_exposed(monkeypatch):
     configure_source_panel(monkeypatch)
     client = SourceCollectorClient([{"found": False, "opened": False}])
@@ -713,7 +752,7 @@ async def test_domestic_platforms_keep_citations_when_panel_open_fails(platform)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "grok"])
 async def test_international_platforms_collect_cited_and_surfaced_fixture_sources(platform):
     fixture = load_source_fixture(platform)
     panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
@@ -753,7 +792,7 @@ async def test_international_platforms_report_none_exposed_without_trigger(platf
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "grok"])
 async def test_international_platforms_keep_citations_when_panel_open_fails(platform):
     fixture = load_source_fixture(platform)
     client = SourceCollectorClient(
