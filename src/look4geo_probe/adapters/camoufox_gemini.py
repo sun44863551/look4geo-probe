@@ -38,6 +38,7 @@ ANSWER_SELECTOR = "message-content .markdown"
 TURN_SELECTOR = "conversation-turn"
 LOGIN_MARKERS = (
     "sign in to continue",
+    "sign in to save activity",
     "before you continue to google",
     "captcha",
     "unusual traffic",
@@ -209,6 +210,16 @@ class GeminiPageDriver:
                 return True
         return False
 
+    async def _wait_for_composer(self, timeout: float = 10.0) -> bool:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            if await self.page.locator(COMPOSER_SELECTOR).count():
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(self.poll_interval)
+
     async def _send(self) -> bool:
         before_url = self.page.url
         before_turns = await self.page.locator(TURN_SELECTOR).count()
@@ -242,7 +253,7 @@ class GeminiPageDriver:
         blocked = await self._blocking_result()
         if blocked is not None:
             return blocked
-        if not await self.page.locator(COMPOSER_SELECTOR).count():
+        if not await self._wait_for_composer():
             return GeminiBrowserResult(
                 status=JobStatus.WAITING_FOR_LOGIN,
                 failure=FailureKind.LOGIN_REQUIRED,

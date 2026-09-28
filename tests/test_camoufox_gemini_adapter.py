@@ -246,6 +246,17 @@ async def test_page_driver_login_waits_for_user_to_complete_visible_login():
 
 
 @pytest.mark.asyncio
+async def test_page_driver_login_rejects_anonymous_gemini_composer():
+    page = FakePage(body="Sign in to save activity", has_composer=True)
+
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, login_timeout=0.01
+    ).login()
+
+    assert result["status"] == "user_action_required"
+
+
+@pytest.mark.asyncio
 async def test_page_driver_re_resolves_detached_composer_and_verifies_prompt(tmp_path):
     page = FakePage(detach_first_fill=True)
 
@@ -282,6 +293,7 @@ async def test_page_driver_accepts_verified_send_transitions(tmp_path, transitio
     ("body", "failure"),
     [
         ("Sign in to continue to Gemini", FailureKind.LOGIN_REQUIRED),
+        ("Sign in to save activity", FailureKind.LOGIN_REQUIRED),
         ("Before you continue to Google", FailureKind.LOGIN_REQUIRED),
         ("Complete this CAPTCHA", FailureKind.LOGIN_REQUIRED),
         ("Our systems have detected unusual traffic", FailureKind.LOGIN_REQUIRED),
@@ -314,6 +326,18 @@ async def test_page_driver_fails_after_three_unchanged_send_attempts(tmp_path):
     assert result.status == JobStatus.FAILED
     assert result.failure == FailureKind.SEND_FAILED
     assert page.click_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_page_driver_waits_for_authenticated_composer_to_load(tmp_path):
+    page = FakePage(has_composer=False, composer_after_checks=3)
+
+    result = await GeminiPageDriver(page, poll_interval=0.001).probe(
+        "hello", 1, tmp_path
+    )
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.composer_checks >= 3
 
 
 def test_camoufox_runtime_defaults_to_headed_macos_and_pinned_browser(tmp_path):
