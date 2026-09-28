@@ -22,6 +22,22 @@ For more than one explicit platform, repeat the existing flag:
 
 When a known entity or product name must be checked, repeat `--expected-term`, for example `--expected-term DCTA --expected-term 环己二胺四乙酸`.
 
+Gemini uses the preferred `camoufox_gemini` adapter inside this same private
+tool, with BrowserSkill and AI-Search-Hub as fallbacks. Before its first run,
+open the visible machine-local login window:
+
+`/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local login gemini --json`
+
+Then run Gemini through the unchanged public command:
+
+`/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform gemini --json`
+
+The profile at `data/camoufox/profiles/gemini` is machine-local and must not be
+uploaded. Let the user resolve any Google challenge in that window; never ask
+for or log credentials. Preserve adapter/fallback diagnostics. Treat
+`login_required` as an uncollected sample, never as "not mentioned", and omit
+it from mention and citation denominators.
+
 ## Source truth boundary
 
 - `sources` records only links visibly exposed by the current product UI. It does not claim to reveal unexposed sources used internally by a model.

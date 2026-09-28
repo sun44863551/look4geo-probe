@@ -27,6 +27,22 @@ Active platform IDs are `doubao`, `deepseek`, `yuanbao`, `baidu`, `chatgpt`,
 `gemini`, `perplexity`, and `grok`. Baidu uses the same unified CLI/MCP tool;
 there is no separate Baidu tool. Qwen is not an active platform.
 
+Gemini remains part of this same tool. Its preferred local adapter is
+`camoufox_gemini`; BrowserSkill and AI-Search-Hub remain fallbacks. Before the
+first Gemini measurement, open the visible machine-local login window with:
+
+`/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local login gemini --json`
+
+After login, use the ordinary unified command:
+
+`/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform gemini --json`
+
+The persistent profile under `data/camoufox/profiles/gemini` is machine-local
+and must not be uploaded. If Google shows a challenge, let the user complete it
+in the visible window; never request or record credentials. Report the selected
+adapter and fallback diagnostic. A `login_required` result is an uncollected
+sample, not "not mentioned", and must be excluded from mention/citation rates.
+
 - Default to `probe_run` with `mode: auto`; use `compare` for cross-market comparison, `all` only when explicitly requested, and `manual` when platforms are named.
 - Report the selected platforms and routing reasons.
 - `probe_run` returns a job ID. Poll `probe_status`, then call `probe_result` only after a terminal state.

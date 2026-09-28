@@ -106,9 +106,20 @@ def test_local_connector_instructions_preserve_private_cli_contract():
         assert "--expected-term" in text
         assert "none_exposed" in text
         assert "failed" in text
+        assert "camoufox_gemini" in text
+        assert "scripts/probe-local login gemini --json" in text
+        assert (
+            'scripts/probe-local run "<question>" --mode manual '
+            '--platform gemini --json'
+        ) in text
+        assert "machine-local" in text
+        assert "login_required" in text
+        assert "not mentioned" in text
 
     assert "public" in readme.casefold()
     assert "must not be uploaded" in readme
+    assert "camoufox_gemini" in readme
+    assert "data/camoufox/profiles/gemini" in readme
 
 
 def test_ai_search_hub_is_a_pinned_submodule_initialized_by_bootstrap():

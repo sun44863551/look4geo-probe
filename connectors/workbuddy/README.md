@@ -28,6 +28,16 @@ Active platform IDs are `doubao`, `deepseek`, `yuanbao`, `baidu`, `chatgpt`,
 `gemini`, `perplexity`, and `grok`. Baidu remains inside this same unified
 local tool; Qwen is no longer an active platform.
 
+Gemini is also not a separate tool. The unified probe prefers
+`camoufox_gemini`, then falls back to BrowserSkill and AI-Search-Hub when the
+failure is eligible for fallback. Its persistent profile lives at
+`data/camoufox/profiles/gemini`; this directory is machine-local, contains
+login state, and must not be uploaded. Start first-time login with
+`scripts/probe-local login gemini --json`, complete any Google challenge only
+in the visible browser window, and continue using the normal `run` command.
+`login_required` means the sample was not collected; it must never be recorded
+as "not mentioned" or included in measurement denominators.
+
 Results keep answer status separate from source capture. `captured` means at
 least one visibly exposed source was collected, `none_exposed` means the UI
 showed none, and `failed` carries a `source_capture_diagnostic` without turning
