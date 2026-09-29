@@ -27,7 +27,10 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         "yuanbao": [browser, ai_hub],
         "baidu": [browser],
         "chatgpt": [browser],
-        "gemini": [browser, ai_hub],
+        # AI-Search-Hub removes a large Chrome profile after each turn. That
+        # cleanup is intentionally blocked by WorkBuddy's safe-delete guard,
+        # so it cannot serve as a reliable Gemini fallback on this machine.
+        "gemini": [browser],
         "perplexity": [browser],
         # AI-Search-Hub resets a large debug profile during Grok fallback, which
         # is unsafe inside WorkBuddy's guarded filesystem. Keep Grok local-only.

@@ -245,6 +245,14 @@ RATE_LIMIT_MARKERS = (
     "升级到 supergrok",
     "升级至 supergrok",
 )
+GEMINI_REFUSAL_MARKERS = (
+    "i'm having a hard time fulfilling your request",
+    "i am having a hard time fulfilling your request",
+    "我只是一个语言模型，理解不了这个问题",
+    "我只是一个语言模型，无法提供",
+    "身为一个语言模型，我没办法提供",
+    "我只是一个语言模型，不具备",
+)
 HUMAN_VERIFICATION_MARKERS = (
     "请确认你的年龄以继续",
     "你出生于哪一年",
@@ -516,6 +524,13 @@ class BskCliClient:
                 stable_rounds = 0
                 continue
             lowered = current_text.casefold()
+            if platform == "gemini" and any(
+                marker in lowered for marker in GEMINI_REFUSAL_MARKERS
+            ):
+                return BrowserProbeOutput(
+                    failure=FailureKind.EXTRACTION_FAILED,
+                    diagnostic="Gemini returned a refusal response",
+                )
             if "429" in lowered or "rate limit" in lowered or "请求过于频繁" in current_text:
                 return BrowserProbeOutput(
                     failure=FailureKind.RATE_LIMITED, diagnostic="platform rate limit detected"
@@ -747,10 +762,26 @@ class BskCliClient:
                     str(observation.get("text", "")) if isinstance(observation, dict) else "",
                     ("Send message", "发送消息"),
                 )
-                await self._run_json(
-                    "click", send_ref or 'button[aria-label*="Send" i]',
-                    "--session", session_id, timeout=timeout
-                )
+                try:
+                    await self._run_json(
+                        "click",
+                        send_ref
+                        or (
+                            'button[aria-label="发送"], button[aria-label="发送消息"], '
+                            'button[aria-label="Send prompt"], button[aria-label*="Send" i]'
+                        ),
+                        "--session", session_id, timeout=timeout
+                    )
+                except RuntimeError:
+                    await self._run_json(
+                        "press",
+                        "Enter",
+                        "--selector",
+                        PLATFORMS[platform]["composer_selector"],
+                        "--session",
+                        session_id,
+                        timeout=timeout,
+                    )
                 await asyncio.sleep(self.poll_interval)
                 result = await self._run_json(
                     "evaluate", state_expression, "--session", session_id, timeout=timeout
@@ -1204,12 +1235,19 @@ class BrowserSkillAdapter(ProbeAdapter):
                 query_normalized=normalized.changed,
             )
         except Exception as error:
+            diagnostic = str(error)
+            failure = FailureKind.UNKNOWN
+            if (
+                platform == "gemini"
+                and "submission state did not change" in diagnostic.casefold()
+            ):
+                failure = FailureKind.SEND_FAILED
             return PlatformAttempt(
                 platform=platform,
                 adapter=self.name,
                 status=JobStatus.FAILED,
-                diagnostic=str(error),
-                failure=FailureKind.UNKNOWN,
+                diagnostic=diagnostic,
+                failure=failure,
                 query_original=normalized.original,
                 query_sent=normalized.sent,
                 query_normalized=normalized.changed,

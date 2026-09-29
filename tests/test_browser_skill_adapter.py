@@ -363,6 +363,22 @@ class GeminiObservedSubmitClient(BskCliClient):
         return {"value": True}
 
 
+class GeminiEnterSubmitClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "observe":
+            return {"text": '@e47 textbox "Enter a prompt for Gemini"'}
+        if args[0] == "click":
+            raise RuntimeError("send button not found")
+        if args[0] == "evaluate":
+            return {"value": {"submitted": True}}
+        return {"value": True}
+
+
 class LoginOverlayClient(BskCliClient):
     def __init__(self):
         super().__init__("browser", poll_interval=0)
@@ -596,7 +612,8 @@ async def test_gemini_submits_using_native_send_button():
     click = next(call for call in client.calls if call[0] == "click")
     assert click[:2] == (
         "click",
-        'button[aria-label*="Send" i]',
+        'button[aria-label="发送"], button[aria-label="发送消息"], '
+        'button[aria-label="Send prompt"], button[aria-label*="Send" i]',
     )
 
 
@@ -623,6 +640,18 @@ async def test_gemini_refreshes_send_button_ref_before_clicking():
 
     click = next(call for call in client.calls if call[0] == "click")
     assert click[:2] == ("click", "@e52")
+
+
+@pytest.mark.asyncio
+async def test_gemini_falls_back_to_enter_when_send_button_is_missing():
+    client = GeminiEnterSubmitClient()
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    press = next(call for call in client.calls if call[0] == "press")
+    assert press[:2] == ("press", "Enter")
+    assert "--selector" in press
+    assert PLATFORMS["gemini"]["composer_selector"] in press
 
 
 @pytest.mark.asyncio
@@ -1001,6 +1030,36 @@ async def test_gemini_unusual_traffic_page_requires_user_action():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        (
+            "I'm having a hard time fulfilling your request. "
+            "Can I help you with something else instead?"
+        ),
+        "我只是一个语言模型，理解不了这个问题，因此没法帮上忙。",
+        "我只是一个语言模型，无法提供这方面的帮助。",
+        "身为一个语言模型，我没办法提供这方面的帮助。",
+        "我只是一个语言模型，不具备这方面的信息或能力，因此没法帮到你。",
+    ],
+)
+async def test_gemini_generic_refusal_is_not_returned_as_a_successful_answer(refusal):
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {"answers": [refusal], "links": [], "page_text": refusal},
+            {"answers": [refusal], "links": [], "page_text": refusal},
+            {"answers": [refusal], "links": [], "page_text": refusal},
+        ]
+    )
+
+    output = await client.probe("session", "gemini", "Which suppliers?", timeout=1)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert output.diagnostic == "Gemini returned a refusal response"
+
+
+@pytest.mark.asyncio
 async def test_grok_prompt_echo_is_ignored_until_real_answer_arrives():
     prompt = "Which suppliers have stock?"
     client = DelayedAnswerClient(
@@ -1281,6 +1340,20 @@ async def test_browser_adapter_stops_session_after_error(tmp_path: Path):
     assert attempt.status == JobStatus.FAILED
     assert "selector changed" in (attempt.diagnostic or "")
     assert client.stopped == ["session-1"]
+
+
+@pytest.mark.asyncio
+async def test_browser_adapter_classifies_gemini_submission_failure(tmp_path: Path):
+    client = FakeBrowserClient(
+        error=RuntimeError("Gemini submission state did not change after 3 attempts")
+    )
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    attempt = await adapter.run("gemini", ProbeRequest(prompt="测试"))
+
+    assert attempt.status == JobStatus.FAILED
+    assert attempt.failure == FailureKind.SEND_FAILED
+    assert attempt.diagnostic == "Gemini submission state did not change after 3 attempts"
 
 
 @pytest.mark.asyncio

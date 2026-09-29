@@ -70,7 +70,6 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
     assert adapters["gemini"].adapter_names == [
         "camoufox_gemini",
         "browser_skill",
-        "ai_search_hub",
     ]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
     assert adapters["baidu"].adapter_names == ["browser_skill"]
@@ -87,7 +86,7 @@ def test_disabling_camoufox_restores_previous_gemini_chain(tmp_path, monkeypatch
 
     adapters = build_adapters(tmp_path, runtime="default")
 
-    assert adapters["gemini"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["gemini"].adapter_names == ["browser_skill"]
 
 
 def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch):

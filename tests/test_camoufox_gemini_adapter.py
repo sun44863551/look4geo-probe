@@ -644,6 +644,39 @@ async def test_adapter_rejects_invalid_or_blocking_answers(tmp_path, answer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        (
+            "I'm having a hard time fulfilling your request. "
+            "Can I help you with something else instead?"
+        ),
+        "我只是一个语言模型，理解不了这个问题，因此没法帮上忙。",
+        "我只是一个语言模型，无法提供这方面的帮助。",
+        "身为一个语言模型，我没办法提供这方面的帮助。",
+        "我只是一个语言模型，不具备这方面的信息或能力，因此没法帮到你。",
+    ],
+)
+async def test_adapter_rejects_gemini_generic_refusal(tmp_path, refusal):
+    runtime = FakeRuntime()
+
+    async def probe(profile_dir, prompt, timeout, artifact_dir):
+        return GeminiBrowserResult(
+            status=JobStatus.SUCCEEDED,
+            answer=refusal,
+        )
+
+    runtime.probe = probe
+    attempt = await make_adapter(tmp_path, runtime).run(
+        "gemini", ProbeRequest(prompt="Which suppliers can provide this API?")
+    )
+
+    assert attempt.status == JobStatus.FAILED
+    assert attempt.failure == FailureKind.EXTRACTION_FAILED
+    assert attempt.diagnostic == "Gemini returned a refusal response"
+
+
+@pytest.mark.asyncio
 async def test_adapter_records_none_exposed_separately_from_answer_success(tmp_path):
     runtime = FakeRuntime()
 

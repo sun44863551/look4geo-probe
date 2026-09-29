@@ -53,3 +53,9 @@ def test_all_selects_every_healthy_platform():
         ProbeRequest(prompt="test", mode=RouteMode.ALL), all_healthy()
     )
     assert decision.selected_platforms == make_router().platform_names
+
+
+def test_gemini_configuration_excludes_guarded_ai_search_hub_fallback():
+    platforms, _ = load_configuration(Path(__file__).parents[1] / "config")
+
+    assert platforms["gemini"]["fallbacks"] == ["browser_skill"]

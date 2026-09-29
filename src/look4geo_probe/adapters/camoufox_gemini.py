@@ -45,6 +45,14 @@ LOGIN_MARKERS = (
     "异常流量",
 )
 RATE_LIMIT_MARKERS = ("reached your limit", "rate limit", "try again later", "达到上限")
+REFUSAL_MARKERS = (
+    "i'm having a hard time fulfilling your request",
+    "i am having a hard time fulfilling your request",
+    "我只是一个语言模型，理解不了这个问题",
+    "我只是一个语言模型，无法提供",
+    "身为一个语言模型，我没办法提供",
+    "我只是一个语言模型，不具备",
+)
 TRANSIENT_ANSWER_MARKERS = (
     "i seem to be encountering an error",
     "something went wrong",
@@ -552,6 +560,17 @@ class CamoufoxGeminiAdapter(ProbeAdapter):
 
         answer = result.answer.strip()
         blocked_text = answer.casefold()
+        if any(marker in blocked_text for marker in REFUSAL_MARKERS):
+            return PlatformAttempt(
+                status=JobStatus.FAILED,
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="Gemini returned a refusal response",
+                **{
+                    key: value
+                    for key, value in common.items()
+                    if key not in {"failure", "diagnostic"}
+                },
+            )
         valid = answer_is_valid_measurement(
             request.prompt, answer, min_answer_chars=1
         ) and not any(marker in blocked_text for marker in LOGIN_MARKERS + RATE_LIMIT_MARKERS)
