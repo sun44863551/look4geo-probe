@@ -454,9 +454,10 @@ def test_camoufox_runtime_scopes_and_restores_content_sandbox_env(tmp_path, monk
 
 
 class ExtractionLocator:
-    def __init__(self, texts=(), links=()):
+    def __init__(self, texts=(), links=(), click=None):
         self.texts = list(texts)
         self.links = list(links)
+        self._click = click
 
     @property
     def last(self):
@@ -471,18 +472,49 @@ class ExtractionLocator:
     async def evaluate_all(self, script):
         return self.links
 
+    def nth(self, index):
+        return ExtractionLocator(click=lambda: self._click(index))
+
+    async def click(self, **kwargs):
+        if self._click:
+            self._click()
+
+
+class ExtractionKeyboard:
+    def __init__(self, page):
+        self.page = page
+
+    async def press(self, key):
+        if key == "Escape":
+            self.page.open_citation = None
+
 
 class ExtractionPage:
-    def __init__(self, answers, cited=(), surfaced=()):
+    def __init__(self, answers, cited=(), surfaced=(), citation_dialogs=()):
         self.answers = answers
         self.cited = cited
         self.surfaced = surfaced
+        self.citation_dialogs = list(citation_dialogs)
+        self.open_citation = None
+        self.keyboard = ExtractionKeyboard(self)
 
     def locator(self, selector):
         if selector == "message-content .markdown":
             return ExtractionLocator(self.answers)
         if "message-content .markdown a" in selector:
             return ExtractionLocator(links=self.cited)
+        if "View source details for citation" in selector:
+            return ExtractionLocator(
+                links=[{} for _ in self.citation_dialogs],
+                click=lambda index: setattr(self, "open_citation", index),
+            )
+        if '[role="dialog"]' in selector:
+            links = (
+                self.citation_dialogs[self.open_citation]
+                if self.open_citation is not None
+                else ()
+            )
+            return ExtractionLocator(links=links)
         if "source-panel" in selector:
             return ExtractionLocator(links=self.surfaced)
         return ExtractionLocator()
@@ -523,6 +555,39 @@ async def test_extracts_normalizes_and_merges_gemini_sources():
     assert sources[0].linked_in_answer is True
     assert sources[1].source_role == SourceRole.SURFACED
     assert sources[1].evidence_origin == SourceEvidenceOrigin.SOURCE_PANEL
+
+
+@pytest.mark.asyncio
+async def test_extracts_links_hidden_behind_gemini_citation_buttons():
+    page = ExtractionPage(
+        ["answer"],
+        citation_dialogs=[
+            [
+                {
+                    "url": "https://support.apple.com/en-sg/121555",
+                    "title": "Mac mini (2024) - Tech Specs",
+                }
+            ],
+            [
+                {
+                    "url": "https://www.racksolutions.com/mac-mini-m4?utm_source=gemini",
+                    "title": "Mac mini M4 compatibility guide",
+                }
+            ],
+        ],
+    )
+
+    sources = await extract_gemini_sources(page)
+
+    assert [source.url for source in sources] == [
+        "https://support.apple.com/en-sg/121555",
+        "https://www.racksolutions.com/mac-mini-m4",
+    ]
+    assert all(source.source_role == SourceRole.CITED for source in sources)
+    assert all(
+        source.evidence_origin == SourceEvidenceOrigin.SOURCE_PANEL
+        for source in sources
+    )
 
 
 @pytest.mark.asyncio

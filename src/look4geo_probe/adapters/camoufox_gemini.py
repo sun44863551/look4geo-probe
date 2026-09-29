@@ -51,6 +51,13 @@ TRANSIENT_ANSWER_MARKERS = (
     "there was an error generating a response",
 )
 SOURCE_PANEL_SELECTOR = "source-panel a[href], sources-list a[href]"
+CITATION_TRIGGER_SELECTOR = (
+    'response-container:last-of-type button[aria-label^="View source details for citation"], '
+    'response-container:last-of-type button[aria-label^="查看引用来源详情"]'
+)
+CITATION_DIALOG_LINK_SELECTOR = (
+    '[role="dialog"] a[href], .mat-mdc-dialog-container a[href]'
+)
 EXCLUDED_SOURCE_DOMAINS = frozenset({"gemini.google.com", "google.com"})
 
 
@@ -124,13 +131,38 @@ def _source_records(
 
 
 async def extract_gemini_sources(page) -> list[SourceRecord]:
-    cited = await _link_payloads(page, f"{ANSWER_SELECTOR} a[href]")
+    cited_answer = await _link_payloads(page, f"{ANSWER_SELECTOR} a[href]")
+    cited_dialog: list[dict] = []
+    citation_triggers = page.locator(CITATION_TRIGGER_SELECTOR)
+    for index in range(await citation_triggers.count()):
+        try:
+            await citation_triggers.nth(index).click(timeout=3000)
+            dialog = page.locator(CITATION_DIALOG_LINK_SELECTOR)
+            try:
+                await dialog.first.wait_for(state="visible", timeout=1500)
+            except Exception:
+                pass
+            cited_dialog.extend(
+                await _link_payloads(page, CITATION_DIALOG_LINK_SELECTOR)
+            )
+        except Exception:
+            continue
+        finally:
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
     surfaced = await _link_payloads(page, SOURCE_PANEL_SELECTOR)
     return merge_sources(
         _source_records(
-            cited,
+            cited_answer,
             role=SourceRole.CITED,
             origin=SourceEvidenceOrigin.ANSWER_DOM,
+        )
+        + _source_records(
+            cited_dialog,
+            role=SourceRole.CITED,
+            origin=SourceEvidenceOrigin.SOURCE_PANEL,
         )
         + _source_records(
             surfaced,

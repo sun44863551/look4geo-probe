@@ -63,6 +63,26 @@ def test_grok_limit_reset_wall_is_rate_limited():
     )
 
 
+def test_grok_free_tier_walls_are_rate_limited_across_locales():
+    """Grok 免费层限额文案会随界面语言变化，两种语言都必须识别为额度墙。
+
+    2026-09-29 实测：账号界面切到中文后，页面显示「免费版限额已达上限」，
+    适配器因只有英文关键词而空等到 180s 超时，并跳过挂起机制连续重试。
+    """
+    # 英文原文（2026-09-28 §2.2 页面证据）
+    assert page_is_rate_limited(
+        {"page_text": "Free tier limit reached\nUpgrade to SuperGrok"}
+    )
+    # 中文原文（2026-09-29 05:18–05:32 页面证据，逐字复刻）
+    grok_zh_wall = (
+        "Best gua sha gift set for self-care\n"
+        "免费版限额已达上限\n"
+        "请稍后再试，或升级至 SuperGrok 享受更高限额和高级功能。\n"
+        "升级到 SuperGrok"
+    )
+    assert page_is_rate_limited({"page_text": grok_zh_wall})
+
+
 def test_grok_limit_diagnostic_preserves_visible_reset_hint():
     assert browser_skill.rate_limit_diagnostic(
         {"page_text": "距离限制重置还剩 1小时 13分钟。等待或升级至 SuperGrok。"}
@@ -1088,6 +1108,46 @@ async def test_perplexity_quota_wall_is_rate_limited_not_timeout():
     )
 
     output = await client.probe("session", "perplexity", "question", timeout=0.01)
+
+    assert output.failure == FailureKind.RATE_LIMITED
+    assert "quota" in (output.diagnostic or "")
+
+
+class DelayedGrokClient(DelayedAnswerClient):
+    """Grok 通道：observe 返回 Grok 输入框；答案区返回给定的页面状态。"""
+
+    async def _run_json(self, *args, timeout=30.0):
+        if args[0] == "navigate":
+            return {"final_url": "https://grok.com/"}
+        if args[0] == "observe":
+            return {"text": '@e18 textbox "Ask Grok anything" [empty]'}
+        return {"value": True}
+
+
+@pytest.mark.asyncio
+async def test_grok_chinese_quota_wall_is_rate_limited_not_timeout():
+    """Grok 中文界面下的免费层额度墙必须被判为 RATE_LIMITED，而不是空等到 timeout。
+
+    页面原文来自 2026-09-29 05:18–05:32 的真实抓取（会话
+    39fd8bfd-d0cc-466c-830d-05e8a73ebd2c / a02f466e-9c99-4c19-894f-cbd049acd8d7）。
+    """
+    client = DelayedGrokClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {
+                "answers": [],
+                "links": [],
+                "page_text": (
+                    "Best gua sha gift set for self-care\n"
+                    "免费版限额已达上限\n"
+                    "请稍后再试，或升级至 SuperGrok 享受更高限额和高级功能。\n"
+                    "升级到 SuperGrok"
+                ),
+            },
+        ]
+    )
+
+    output = await client.probe("session", "grok", "Best gua sha gift set for self-care", timeout=0.01)
 
     assert output.failure == FailureKind.RATE_LIMITED
     assert "quota" in (output.diagnostic or "")

@@ -235,6 +235,15 @@ RATE_LIMIT_MARKERS = (
     "free searches limit",
     "距离限制重置还剩",
     "upgrade to supergrok",
+    # Grok 免费层限额文案。界面语言会随账号/浏览器语言变化：
+    # 英文为「Free tier limit reached / Upgrade to SuperGrok」，
+    # 中文为「免费版限额已达上限 / 请稍后再试，或升级至 SuperGrok 享受更高限额和高级功能。」
+    # 2026-09-29 实测：中文文案未被识别，导致额度墙被误记为 timeout 且跳过挂起机制。
+    "free tier limit reached",
+    "免费版限额已达上限",
+    "限额已达上限",
+    "升级到 supergrok",
+    "升级至 supergrok",
 )
 HUMAN_VERIFICATION_MARKERS = (
     "请确认你的年龄以继续",
