@@ -10,7 +10,7 @@ CONTAMINATION_RE = re.compile(
     re.I,
 )
 PREAMBLE_RE = re.compile(
-    r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
+    r"^(?:我会|我先|我将|我来|I(?:['’]?ll| will)\b|Let me\b)", re.I
 )
 STUB_RE = re.compile(
     r"^(正在运行代码解释器|正在思考|正在搜索网络|搜索中|加载中|跳过)(?:…|\.\.\.)?(?:\s*跳过)?$",
@@ -38,7 +38,8 @@ def answer_is_valid_measurement(
         return False
     if CONTAMINATION_RE.search(answer):
         return False
-    if PREAMBLE_RE.match(answer) and len(answer) < 300:
+    lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    if len(answer) < 600 and any(PREAMBLE_RE.match(line) for line in lines):
         return False
     if len(answer) < min_answer_chars:
         return False

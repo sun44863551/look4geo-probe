@@ -1136,6 +1136,17 @@ async def test_chatgpt_chinese_preamble_is_not_success():
     assert output.failure == FailureKind.EXTRACTION_FAILED
 
 
+@pytest.mark.parametrize(
+    "preamble",
+    [
+        "我来帮你查一下目前做 GEO 有实际案例的服务商。先检索几组关键词。",
+        "我将结合 GEO 服务的行业特性，整理一套可直接落地的评分标准。",
+    ],
+)
+def test_doubao_search_preamble_is_incomplete(preamble):
+    assert browser_skill.is_incomplete_preamble("doubao", preamble) is True
+
+
 @pytest.mark.asyncio
 async def test_chatgpt_project_context_contamination_is_not_success():
     contaminated = "主线进度：继续围绕 Look4GEO 的化工询盘能力做可验证证据测试。"
@@ -1285,6 +1296,16 @@ async def test_explicit_timeout_overrides_baidu_default(tmp_path: Path):
     await adapter.run("baidu", ProbeRequest(prompt="测试", options={"timeout": 12}))
 
     assert client.last_timeout == 12
+
+
+@pytest.mark.asyncio
+async def test_doubao_uses_longer_default_timeout_for_deep_search(tmp_path: Path):
+    client = FakeBrowserClient(BrowserProbeOutput(answer="完整回答"))
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    await adapter.run("doubao", ProbeRequest(prompt="测试"))
+
+    assert client.last_timeout == 300
 
 
 @pytest.mark.asyncio

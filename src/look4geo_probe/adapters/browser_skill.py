@@ -40,6 +40,7 @@ PLATFORMS = {
         ),
         "conversation_marker": "/chat/",
         "answer_selector": '[data-testid="message_text_content"]',
+        "default_timeout": 300.0,
     },
     "chatgpt": {
         "url": "https://chatgpt.com/",
@@ -262,7 +263,7 @@ HUMAN_VERIFICATION_MARKERS = (
     "我们的系统检测到您的计算机网络中存在异常流量",
 )
 PREAMBLE_PATTERN = re.compile(
-    r"^(?:我会|我先|我将|I(?:['’]?ll| will)\b|Let me\b)", re.I
+    r"^(?:我会|我先|我将|我来|I(?:['’]?ll| will)\b|Let me\b)", re.I
 )
 
 
@@ -364,7 +365,11 @@ def page_requires_human_verification(page: dict) -> bool:
 
 
 def is_incomplete_preamble(platform: str, answer: str) -> bool:
-    return platform == "chatgpt" and len(answer) < 300 and bool(PREAMBLE_PATTERN.match(answer))
+    return (
+        platform in {"chatgpt", "doubao"}
+        and len(answer) < 300
+        and bool(PREAMBLE_PATTERN.match(answer))
+    )
 
 
 def is_context_contamination(platform: str, prompt: str, answer: str) -> bool:
@@ -1183,7 +1188,8 @@ class BrowserSkillAdapter(ProbeAdapter):
                 normalized.sent,
                 float(
                     request.options.get(
-                        "timeout", self.default_timeout
+                        "timeout",
+                        PLATFORMS[platform].get("default_timeout", self.default_timeout),
                     )
                 ),
             )

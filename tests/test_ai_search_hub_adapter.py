@@ -112,6 +112,32 @@ async def test_ai_hub_rejects_landing_page_placeholder_as_success(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_ai_hub_rejects_doubao_deep_search_preamble_wrapped_in_page_text(
+    tmp_path: Path,
+):
+    output = tmp_path / "answer.txt"
+    output.write_text(
+        "GEO优化服务招标技术标与评分标准撰写\n"
+        "AI 生成可能有误 请核实\n"
+        "想招标采购 GEO 优化服务，技术标和评分标准应该怎么写？\n"
+        "搜索 1 个关键词，参考 10 篇资料\n"
+        "我将结合 GEO 地理优化服务的行业特性，整理一套可直接落地、标准化的技术标模板。\n"
+        "对话\n视频生成\n音乐生成\n录音转写\n豆包 快速",
+        encoding="utf-8",
+    )
+    adapter = AIHubAdapter(
+        tmp_path, runner=FakeRunner(CommandResult(0, "done", ""))
+    )
+
+    attempt = await adapter.run(
+        "doubao", ProbeRequest(prompt="想招标采购GEO优化服务", options={"output": str(output)})
+    )
+
+    assert attempt.status == JobStatus.FAILED
+    assert attempt.failure == FailureKind.EXTRACTION_FAILED
+
+
+@pytest.mark.asyncio
 async def test_ai_hub_uses_configured_default_timeout(tmp_path: Path):
     output = tmp_path / "answer.txt"
     output.write_text("这是一个足够长且有效的完整回答内容，用于验证默认超时时间。", encoding="utf-8")
