@@ -537,6 +537,14 @@ class BskCliClient:
                     failure=FailureKind.RATE_LIMITED,
                     diagnostic=rate_limit_diagnostic(page),
                 )
+            page_text = str(page.get("page_text") or "").casefold()
+            if platform == "gemini" and any(
+                marker in page_text for marker in GEMINI_TRANSIENT_ERROR_MARKERS
+            ):
+                return BrowserProbeOutput(
+                    failure=FailureKind.EXTRACTION_FAILED,
+                    diagnostic="Gemini returned a transient platform error",
+                )
             candidates = [str(value) for value in page.get("answers", [])]
             delta = answers_after_baseline(candidates, baseline)
             delta = [candidate for candidate in delta if not is_prompt_echo(candidate, prompt)]

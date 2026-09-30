@@ -1150,6 +1150,22 @@ async def test_gemini_transient_error_is_not_returned_as_success(transient_error
 
 
 @pytest.mark.asyncio
+async def test_gemini_page_level_transient_error_does_not_wait_for_answer_timeout():
+    transient_error = "I encountered an error doing what you asked. Could you try again?"
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {"answers": [], "links": [], "page_text": transient_error},
+        ]
+    )
+
+    output = await client.probe("session", "gemini", "Which suppliers?", timeout=1)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert output.diagnostic == "Gemini returned a transient platform error"
+
+
+@pytest.mark.asyncio
 async def test_gemini_overlapping_stream_prefix_is_collapsed():
     duplicated = (
         "A Drug Master File contains confidential manufacturing information while"

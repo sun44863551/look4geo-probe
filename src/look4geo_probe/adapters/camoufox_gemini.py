@@ -312,6 +312,13 @@ class GeminiPageDriver:
     async def _wait_for_answer(self) -> str:
         previous = ""
         while True:
+            body = await self._body_text()
+            transient = next(
+                (marker for marker in TRANSIENT_ANSWER_MARKERS if marker in body),
+                None,
+            )
+            if transient is not None:
+                return transient
             answer = self.page.locator(ANSWER_SELECTOR).last
             text = (await answer.inner_text()).strip() if await answer.count() else ""
             generating = bool(await self.page.locator(STOP_SELECTOR).count())

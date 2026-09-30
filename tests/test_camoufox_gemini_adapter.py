@@ -193,6 +193,8 @@ class FakeLocator:
             response = self.page.responses.pop(0)
             self.page.answers = [response]
             self.page.answer_reads = [response, response]
+        if self.page.response_bodies:
+            self.page.body = self.page.response_bodies.pop(0)
         if self.page.transition == "composer":
             self.page.composer = ""
         elif self.page.transition == "url":
@@ -225,6 +227,7 @@ class FakePage:
         enter_sends=False,
         silent_clear_attempts=0,
         responses=(),
+        response_bodies=(),
     ):
         self.body = body
         self.has_composer = has_composer
@@ -240,6 +243,7 @@ class FakePage:
         self.enter_sends = enter_sends
         self.silent_clear_attempts = silent_clear_attempts
         self.responses = list(responses)
+        self.response_bodies = list(response_bodies)
         self.composer = ""
         self.fill_calls = 0
         self.click_calls = 0
@@ -377,6 +381,24 @@ async def test_page_driver_retries_transient_gemini_error_answer(tmp_path, trans
     assert result.status == JobStatus.SUCCEEDED
     assert result.answer == "Python 3.12.0 was released on October 2, 2023."
     assert page.click_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_page_driver_classifies_page_level_transient_error_without_timeout(tmp_path):
+    page = FakePage(
+        answers=(),
+        response_bodies=(
+            "I encountered an error doing what you asked. Could you try again?",
+        ),
+    )
+
+    result = await GeminiPageDriver(page, poll_interval=0.001).probe(
+        "Which suppliers?", 0.02, tmp_path
+    )
+
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.EXTRACTION_FAILED
+    assert result.diagnostic == "Gemini returned a transient platform error 3 times"
 
 
 @pytest.mark.asyncio
