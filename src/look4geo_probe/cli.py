@@ -34,17 +34,23 @@ def run(
     mode: RouteMode = typer.Option(RouteMode.AUTO),
     platform: list[str] = typer.Option(None),
     expected_term: list[str] = typer.Option(None, "--expected-term"),
+    timeout: float | None = typer.Option(None, "--timeout", min=1, max=1800),
     repeats: int = typer.Option(1, min=1, max=10),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     async def execute():
         service = _service_factory()
+        options = {}
+        if timeout is not None:
+            options["timeout"] = timeout
+        if expected_term:
+            options["expected_terms"] = expected_term
         submission = await service.run(
             ProbeRequest(
                 prompt=prompt,
                 mode=mode,
                 platforms=platform or [],
-                options={"expected_terms": expected_term} if expected_term else {},
+                options=options,
                 repeats=repeats,
             )
         )

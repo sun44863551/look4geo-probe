@@ -79,3 +79,24 @@ async def test_mcp_run_accepts_expected_terms_for_quality_review():
         "DCTA",
         "环己二胺四乙酸",
     ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_accepts_timeout_alongside_expected_terms():
+    service = FakeService()
+    tools = ProbeMcpTools(service)
+
+    await tools.probe_run("source?", timeout=600, expected_terms=["DCTA"])
+
+    assert service.last_request.options == {
+        "timeout": 600.0,
+        "expected_terms": ["DCTA"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_run_rejects_timeout_outside_supported_range():
+    tools = ProbeMcpTools(FakeService())
+
+    with pytest.raises(ValueError, match="timeout must be between 1 and 1800 seconds"):
+        await tools.probe_run("source?", timeout=0)

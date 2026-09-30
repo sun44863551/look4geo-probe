@@ -13,6 +13,8 @@ For one named platform, run:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --json`
 
+For long research answers, set the per-adapter budget explicitly with `--timeout 600`. Keep the outer task timeout higher than this value so fallback adapters can finish.
+
 When the expected entity is known, add one or more quality aliases:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform doubao --expected-term DCTA --expected-term 环己二胺四乙酸 --json`

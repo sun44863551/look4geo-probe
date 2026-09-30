@@ -17,13 +17,21 @@ class ProbeMcpTools:
         platforms: list[str] | None = None,
         repeats: int = 1,
         expected_terms: list[str] | None = None,
+        timeout: float | None = None,
     ) -> dict:
+        if timeout is not None and not 1 <= timeout <= 1800:
+            raise ValueError("timeout must be between 1 and 1800 seconds")
+        options = {}
+        if timeout is not None:
+            options["timeout"] = timeout
+        if expected_terms:
+            options["expected_terms"] = expected_terms
         submission = await self.service.run(
             ProbeRequest(
                 prompt=prompt,
                 mode=RouteMode(mode),
                 platforms=platforms or [],
-                options={"expected_terms": expected_terms} if expected_terms else {},
+                options=options,
                 repeats=repeats,
             )
         )

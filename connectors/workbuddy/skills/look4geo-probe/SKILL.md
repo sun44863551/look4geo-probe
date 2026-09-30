@@ -11,6 +11,7 @@ Use the private local CLI at:
 
 1. Run `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode auto --json` unless the user requests named platforms or a comprehensive comparison.
 2. For explicit selection, add one or more `--platform <name>` options and use `--mode manual`, for example `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --json`.
+3. For long research answers, pass `--timeout 600`; the WorkBuddy runner timeout must be higher than this so a fallback adapter can complete.
 3. Tell the user which platforms were selected and why.
 4. The local CLI waits for completion and returns the result. Use the same absolute script path with `platforms --json` to inspect availability.
 5. For a login requirement, use the same absolute script path with `login <platform> --json` and let the user complete the visible browser step. Never ask for credentials or extract browser secrets.

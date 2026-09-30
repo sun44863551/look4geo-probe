@@ -131,3 +131,19 @@ def test_cli_accepts_expected_terms_for_quality_review():
         "DCTA",
         "环己二胺四乙酸",
     ]
+
+
+def test_cli_accepts_timeout_alongside_expected_terms():
+    service = FakeService()
+    set_service_factory(lambda: service)
+
+    result = CliRunner().invoke(
+        app,
+        ["run", "hello", "--timeout", "600", "--expected-term", "DCTA", "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert service.last_request.options == {
+        "timeout": 600.0,
+        "expected_terms": ["DCTA"],
+    }
