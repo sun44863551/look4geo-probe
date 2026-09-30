@@ -52,6 +52,13 @@ async def test_ai_hub_returns_saved_answer_and_uses_argument_array(tmp_path: Pat
     command, _ = runner.commands[0]
     assert command[:3] == ["python-test", str(tmp_path / "scripts/run_web_chat.py"), "--site"]
     assert command[4:6] == ["--prompt", "测试问题"]
+    profile = str(tmp_path / "chrome_debug_profile_skill")
+    assert command[-4:] == [
+        "--debug-profile-dir",
+        profile,
+        "--user-data-source",
+        profile,
+    ]
 
 
 @pytest.mark.asyncio

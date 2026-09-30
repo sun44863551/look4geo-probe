@@ -106,6 +106,15 @@ class AIHubAdapter(ProbeAdapter):
             "--output",
             str(output),
         ]
+        debug_profile = self.repository / "chrome_debug_profile_skill"
+        command.extend(
+            [
+                "--debug-profile-dir",
+                str(debug_profile),
+                "--user-data-source",
+                str(debug_profile),
+            ]
+        )
         timeout = float(request.options.get("timeout", self.default_timeout))
         try:
             result = await self.runner.run(command, timeout)

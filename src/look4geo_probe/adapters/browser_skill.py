@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
+from ..browser_lock import BrowserOperationLock
 from ..models import (
     FailureKind,
     JobStatus,
@@ -122,11 +123,13 @@ for _platform_config in PLATFORMS.values():
             "source_card_selectors": (),
             "source_url_attributes": ("href",),
             "excluded_source_domains": (),
+            "document_source_fallback": True,
         }
     )
 
 PLATFORMS["doubao"].update(
     {
+        "document_source_fallback": False,
         "source_trigger_labels": ("来源", "参考资料", "网页"),
         "source_trigger_selectors": ('[data-testid*="source"]',),
         "source_panel_selectors": ('[role="dialog"]',),
@@ -1066,13 +1069,15 @@ class BskCliClient:
             + json.dumps(list(config["source_trigger_labels"]), ensure_ascii=False)
             + "; const answerSelector = "
             + json.dumps(config["answer_selector"])
+            + "; const allowDocumentFallback = "
+            + json.dumps(bool(config.get("document_source_fallback", True)))
             + "; const answers = [...document.querySelectorAll(answerSelector)]; "
             "const root = answers.at(-1) || document; let trigger = null; "
             "for (const selector of selectors) { trigger = root.querySelector(selector) || "
-            "document.querySelector(selector); if (trigger) break; } "
+            "(allowDocumentFallback ? document.querySelector(selector) : null); if (trigger) break; } "
             "if (!trigger && labels.length) { const controls = [...root.querySelectorAll("
-            "'button,[role=button],a,[onclick]'), ...document.querySelectorAll("
-            "'button,[role=button],a,[onclick]')]; trigger = controls.find(node => { const text = "
+            "'button,[role=button],a,[onclick]'), ...(allowDocumentFallback ? document.querySelectorAll("
+            "'button,[role=button],a,[onclick]') : [])]; trigger = controls.find(node => { const text = "
             "((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim(); "
             "return labels.some(label => text.includes(label)); }); } "
             "if (!trigger) return {found:false,opened:false}; "
@@ -1096,13 +1101,15 @@ class BskCliClient:
             + json.dumps(list(config["source_card_selectors"]))
             + "; const urlAttributes = "
             + json.dumps(list(config["source_url_attributes"]))
-            + "; const panels = panelSelectors.flatMap(selector => "
+            + "; let panels = panelSelectors.flatMap(selector => "
             "[...document.querySelectorAll(selector)]); if (!panels.length && panelLabels.length) { "
             "const labelled = [...document.querySelectorAll('h1,h2,h3,h4,[role=heading]')].filter("
             "node => panelLabels.some(label => (node.innerText || '').includes(label))); "
             "for (const heading of labelled) { let node = heading; for (let depth = 0; node && depth < 6; "
             "depth += 1, node = node.parentElement) { if (cardSelectors.some(selector => "
             "node.querySelector(selector))) { panels.push(node); break; } } } } "
+            "panels = panels.filter(panel => panel.getClientRects().length && "
+            "(!panelLabels.length || panelLabels.some(label => (panel.innerText || '').includes(label)))); "
             "if (!panels.length) return {panel_found:false,cards:[]}; const cards = panels.flatMap(panel => "
             "cardSelectors.flatMap(selector => [...panel.querySelectorAll(selector)])); "
             "return {panel_found:true,cards:cards.map(card => { const anchor = "
@@ -1159,6 +1166,9 @@ class BrowserSkillAdapter(ProbeAdapter):
         self.client = client
         self.artifact_root = Path(artifact_root)
         self.default_timeout = default_timeout
+        self.operation_lock = BrowserOperationLock(
+            self.artifact_root.parent / ".browser_skill.lock"
+        )
 
     async def health(self, platform: str) -> AdapterHealth:
         return AdapterHealth(platform in PLATFORMS, "configured" if platform in PLATFORMS else "unsupported")
@@ -1171,6 +1181,12 @@ class BrowserSkillAdapter(ProbeAdapter):
         }
 
     async def run(self, platform: str, request: ProbeRequest) -> PlatformAttempt:
+        async with self.operation_lock:
+            return await self._run_exclusive(platform, request)
+
+    async def _run_exclusive(
+        self, platform: str, request: ProbeRequest
+    ) -> PlatformAttempt:
         if platform not in PLATFORMS:
             return PlatformAttempt(
                 platform=platform,

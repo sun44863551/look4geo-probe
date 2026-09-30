@@ -558,6 +558,27 @@ def test_doubao_answer_boundary_targets_message_content():
     assert PLATFORMS["doubao"]["answer_selector"] == '[data-testid="message_text_content"]'
 
 
+@pytest.mark.asyncio
+async def test_doubao_source_trigger_stays_inside_latest_answer():
+    client = FillFallbackClient()
+
+    await client._open_source_panel("session", "doubao")
+
+    expression = client.calls[-1][1]
+    assert "const allowDocumentFallback = false" in expression
+
+
+@pytest.mark.asyncio
+async def test_source_panel_reader_filters_hidden_and_unlabelled_panels():
+    client = FillFallbackClient()
+
+    await client._source_panel_page("session", "doubao")
+
+    expression = client.calls[-1][1]
+    assert "panel.getClientRects().length" in expression
+    assert "panelLabels.some" in expression
+
+
 def test_gemini_answer_boundary_excludes_prompt_and_navigation():
     assert PLATFORMS["gemini"]["composer_selector"] == (
         'div[aria-label="Enter a prompt for Gemini"], '
