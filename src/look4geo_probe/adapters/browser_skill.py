@@ -1254,18 +1254,40 @@ class BrowserSkillAdapter(ProbeAdapter):
         session_id: str | None = None
         normalized = normalize_for_browser(request.prompt)
         try:
-            session_id = await self.client.start(platform)
-            output = await self.client.probe(
-                session_id,
-                platform,
-                normalized.sent,
-                float(
-                    request.options.get(
-                        "timeout",
-                        PLATFORMS[platform].get("default_timeout", self.default_timeout),
-                    )
-                ),
+            total_timeout = float(
+                request.options.get(
+                    "timeout",
+                    PLATFORMS[platform].get("default_timeout", self.default_timeout),
+                )
             )
+            max_attempts = 3 if platform == "gemini" else 1
+            attempt_timeout = total_timeout / max_attempts
+            retryable = {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
+            for attempt_index in range(max_attempts):
+                session_id = await self.client.start(platform)
+                try:
+                    output = await self.client.probe(
+                        session_id,
+                        platform,
+                        normalized.sent,
+                        attempt_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    output = BrowserProbeOutput(
+                        failure=FailureKind.TIMEOUT,
+                        diagnostic="timeout",
+                    )
+                finally:
+                    try:
+                        await self.client.stop(session_id)
+                    except Exception:
+                        pass
+                    session_id = None
+                if (
+                    output.failure not in retryable
+                    or attempt_index == max_attempts - 1
+                ):
+                    break
             if output.login_required:
                 return PlatformAttempt(
                     platform=platform,

@@ -57,7 +57,11 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
             profile_dir,
             root / "data/camoufox/artifacts",
         )
-        chains["gemini"].insert(0, camoufox)
+        # The authenticated Chrome/BrowserSkill path produced the stable 39/39
+        # Gemini baseline and can reuse the user's normal Web session. Keep
+        # Camoufox available as a Web-only fallback, but do not let a fresh
+        # automated profile consume the full timeout before that proven path.
+        chains["gemini"].append(camoufox)
     return {
         platform: AdapterChain(platform, adapters)
         for platform, adapters in chains.items()

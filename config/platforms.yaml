@@ -4,6 +4,6 @@ platforms:
   yuanbao: {region: domestic, primary: browser_skill, fallback: ai_search_hub, citations: true}
   baidu: {region: domestic, primary: browser_skill, citations: true}
   chatgpt: {region: international, primary: browser_skill, citations: true}
-  gemini: {region: international, primary: camoufox_gemini, fallbacks: [browser_skill], citations: true}
+  gemini: {region: international, primary: browser_skill, fallbacks: [camoufox_gemini], citations: true}
   perplexity: {region: international, primary: browser_skill, citations: true}
   grok: {region: international, primary: browser_skill, fallback: ai_search_hub, citations: true}

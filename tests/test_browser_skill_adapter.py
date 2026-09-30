@@ -1373,9 +1373,10 @@ async def test_grok_chinese_quota_wall_is_rate_limited_not_timeout():
 
 
 class FakeBrowserClient:
-    def __init__(self, output=None, error=None):
+    def __init__(self, output=None, error=None, outputs=None):
         self.output = output
         self.error = error
+        self.outputs = list(outputs or [])
         self.started = []
         self.stopped = []
         self.last_prompt = None
@@ -1383,13 +1384,15 @@ class FakeBrowserClient:
 
     async def start(self, platform):
         self.started.append(platform)
-        return "session-1"
+        return f"session-{len(self.started)}"
 
     async def probe(self, session_id, platform, prompt, timeout):
         self.last_prompt = prompt
         self.last_timeout = timeout
         if self.error:
             raise self.error
+        if self.outputs:
+            return self.outputs.pop(0)
         return self.output
 
     async def stop(self, session_id):
@@ -1524,6 +1527,36 @@ async def test_browser_adapter_classifies_gemini_submission_failure(tmp_path: Pa
     assert attempt.status == JobStatus.FAILED
     assert attempt.failure == FailureKind.SEND_FAILED
     assert attempt.diagnostic == "Gemini submission state did not change after 3 attempts"
+
+
+@pytest.mark.asyncio
+async def test_gemini_retries_transient_web_failures_within_one_timeout_budget(
+    tmp_path: Path,
+):
+    client = FakeBrowserClient(
+        outputs=[
+            BrowserProbeOutput(
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="Gemini returned a transient platform error",
+            ),
+            BrowserProbeOutput(
+                failure=FailureKind.TIMEOUT,
+                diagnostic="timeout",
+            ),
+            BrowserProbeOutput(answer="A complete Gemini Web answer."),
+        ]
+    )
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    attempt = await adapter.run(
+        "gemini", ProbeRequest(prompt="Which suppliers?", options={"timeout": 300})
+    )
+
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert attempt.raw_answer == "A complete Gemini Web answer."
+    assert client.started == ["gemini", "gemini", "gemini"]
+    assert client.stopped == ["session-1", "session-2", "session-3"]
+    assert client.last_timeout == 100
 
 
 @pytest.mark.asyncio

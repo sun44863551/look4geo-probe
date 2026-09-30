@@ -58,4 +58,5 @@ def test_all_selects_every_healthy_platform():
 def test_gemini_configuration_excludes_guarded_ai_search_hub_fallback():
     platforms, _ = load_configuration(Path(__file__).parents[1] / "config")
 
-    assert platforms["gemini"]["fallbacks"] == ["browser_skill"]
+    assert platforms["gemini"]["primary"] == "browser_skill"
+    assert platforms["gemini"]["fallbacks"] == ["camoufox_gemini"]

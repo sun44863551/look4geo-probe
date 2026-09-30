@@ -68,8 +68,8 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
 
     assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
     assert adapters["gemini"].adapter_names == [
-        "camoufox_gemini",
         "browser_skill",
+        "camoufox_gemini",
     ]
     assert adapters["chatgpt"].adapter_names == ["browser_skill"]
     assert adapters["baidu"].adapter_names == ["browser_skill"]
@@ -94,9 +94,13 @@ def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch)
     monkeypatch.setenv("LOOK4GEO_CAMOUFOX_DISABLE_CONTENT_SANDBOX", "1")
 
     adapters = build_adapters(tmp_path)
-    runtime = adapters["gemini"].adapters[0].runtime
+    camoufox = next(
+        adapter
+        for adapter in adapters["gemini"].adapters
+        if adapter.name == "camoufox_gemini"
+    )
 
-    assert runtime.disable_content_sandbox is True
+    assert camoufox.runtime.disable_content_sandbox is True
 
 
 def test_local_connector_instructions_preserve_private_cli_contract():
