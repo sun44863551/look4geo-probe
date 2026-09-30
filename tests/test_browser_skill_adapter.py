@@ -1126,6 +1126,55 @@ async def test_gemini_generic_refusal_is_not_returned_as_a_successful_answer(ref
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transient_error",
+    [
+        "I seem to be encountering an error. Can I try something else for you?",
+        "I encountered an error doing what you asked. Could you try again?",
+    ],
+)
+async def test_gemini_transient_error_is_not_returned_as_success(transient_error):
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {"answers": [transient_error], "links": [], "page_text": transient_error},
+            {"answers": [transient_error], "links": [], "page_text": transient_error},
+            {"answers": [transient_error], "links": [], "page_text": transient_error},
+        ]
+    )
+
+    output = await client.probe("session", "gemini", "Which suppliers?", timeout=1)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert output.diagnostic == "Gemini returned a transient platform error"
+
+
+@pytest.mark.asyncio
+async def test_gemini_overlapping_stream_prefix_is_collapsed():
+    duplicated = (
+        "A Drug Master File contains confidential manufacturing information while"
+        "A Drug Master File contains voluntary manufacturing information "
+        "that the FDA reviews with a referenced application."
+    )
+    expected = (
+        "A Drug Master File contains voluntary manufacturing information "
+        "that the FDA reviews with a referenced application."
+    )
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": [], "page_text": ""},
+            {"answers": [duplicated], "links": [], "page_text": duplicated},
+            {"answers": [duplicated], "links": [], "page_text": duplicated},
+            {"answers": [duplicated], "links": [], "page_text": duplicated},
+        ]
+    )
+
+    output = await client.probe("session", "gemini", "What is a DMF?", timeout=1)
+
+    assert output.answer == expected
+
+
+@pytest.mark.asyncio
 async def test_grok_prompt_echo_is_ignored_until_real_answer_arrives():
     prompt = "Which suppliers have stock?"
     client = DelayedAnswerClient(
@@ -1200,6 +1249,24 @@ async def test_chatgpt_chinese_preamble_is_not_success():
     output = await client.probe("session", "chatgpt", "Research suppliers", timeout=0.01)
 
     assert output.failure == FailureKind.EXTRACTION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_search_heading_is_not_returned_as_answer():
+    heading = "核查供应商资料"
+    client = DelayedAnswerClient(
+        [
+            {"answers": [], "links": []},
+            {"answers": [heading], "links": []},
+            {"answers": [heading], "links": []},
+            {"answers": [heading], "links": []},
+        ]
+    )
+
+    output = await client.probe("session", "chatgpt", "Research suppliers", timeout=0.01)
+
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert output.answer == ""
 
 
 @pytest.mark.parametrize(

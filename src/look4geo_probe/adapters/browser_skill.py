@@ -229,6 +229,7 @@ TRANSIENT_ANSWER_LINES = {
     "generating",
     "searching the web",
     "skip",
+    "核查供应商资料",
 }
 RATE_LIMIT_MARKERS = (
     "429",
@@ -256,6 +257,12 @@ GEMINI_REFUSAL_MARKERS = (
     "我只是一个语言模型，无法提供",
     "身为一个语言模型，我没办法提供",
     "我只是一个语言模型，不具备",
+)
+GEMINI_TRANSIENT_ERROR_MARKERS = (
+    "i seem to be encountering an error",
+    "i encountered an error doing what you asked",
+    "something went wrong",
+    "there was an error generating a response",
 )
 HUMAN_VERIFICATION_MARKERS = (
     "请确认你的年龄以继续",
@@ -340,6 +347,18 @@ def is_valid_answer(candidate: str) -> bool:
 
 def comparable_text(value: str) -> str:
     return re.sub(r"[^\w]+", "", value, flags=re.UNICODE).casefold()
+
+
+def collapse_overlapping_stream_prefix(value: str, *, minimum_prefix: int = 40) -> str:
+    """Remove a duplicated leading stream fragment from a rendered answer."""
+    anchor = value[:24]
+    restart = value.find(anchor, max(minimum_prefix, len(anchor)))
+    if restart >= 0 and value[restart - 1].isalnum():
+        return value[restart:]
+    for boundary in range(minimum_prefix, len(value) // 2 + 1):
+        if value[boundary:].startswith(value[:boundary]):
+            return value[boundary:]
+    return value
 
 
 def is_prompt_echo(candidate: str, prompt: str) -> bool:
@@ -525,6 +544,8 @@ class BskCliClient:
             current_text = select_main_answer(platform, delta)
             if not current_text:
                 continue
+            if platform == "gemini":
+                current_text = collapse_overlapping_stream_prefix(current_text)
             if is_incomplete_preamble(platform, current_text) or is_context_contamination(
                 platform, prompt, current_text
             ):
@@ -532,6 +553,13 @@ class BskCliClient:
                 stable_rounds = 0
                 continue
             lowered = current_text.casefold()
+            if platform == "gemini" and any(
+                marker in lowered for marker in GEMINI_TRANSIENT_ERROR_MARKERS
+            ):
+                return BrowserProbeOutput(
+                    failure=FailureKind.EXTRACTION_FAILED,
+                    diagnostic="Gemini returned a transient platform error",
+                )
             if platform == "gemini" and any(
                 marker in lowered for marker in GEMINI_REFUSAL_MARKERS
             ):
