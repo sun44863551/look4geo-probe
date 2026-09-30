@@ -27,6 +27,7 @@ class FakeRuntime:
         self.health_result = health
         self.health_profiles: list[Path] = []
         self.login_profiles: list[Path] = []
+        self.probe_timeouts: list[float] = []
 
     async def health(self, profile_dir: Path) -> AdapterHealth:
         self.health_profiles.append(profile_dir)
@@ -39,6 +40,7 @@ class FakeRuntime:
     async def probe(
         self, profile_dir: Path, prompt: str, timeout: float, artifact_dir: Path
     ) -> GeminiBrowserResult:
+        self.probe_timeouts.append(timeout)
         return GeminiBrowserResult(status=JobStatus.SUCCEEDED, answer="answer")
 
 
@@ -56,6 +58,15 @@ def test_constructor_does_not_create_profile_or_artifact_directories(tmp_path):
     assert adapter.name == "camoufox_gemini"
     assert not (tmp_path / "profile").exists()
     assert not (tmp_path / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_adapter_uses_300_second_default_for_long_gemini_answers(tmp_path):
+    runtime = FakeRuntime()
+
+    await make_adapter(tmp_path, runtime).run("gemini", ProbeRequest(prompt="question"))
+
+    assert runtime.probe_timeouts == [300.0]
 
 
 @pytest.mark.asyncio
@@ -344,10 +355,17 @@ async def test_page_driver_rejects_composer_clear_without_submission(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_page_driver_retries_transient_gemini_error_answer(tmp_path):
+@pytest.mark.parametrize(
+    "transient",
+    [
+        "I seem to be encountering an error. Can I try something else for you?",
+        "I encountered an error doing what you asked. Could you try again?",
+    ],
+)
+async def test_page_driver_retries_transient_gemini_error_answer(tmp_path, transient):
     page = FakePage(
         responses=(
-            "I seem to be encountering an error. Can I try something else for you?",
+            transient,
             "Python 3.12.0 was released on October 2, 2023.",
         )
     )

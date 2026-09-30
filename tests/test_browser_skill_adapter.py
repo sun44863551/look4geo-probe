@@ -198,6 +198,15 @@ class GeminiFilledDespiteErrorClient(FillFallbackClient):
         return "hello"
 
 
+class GeminiSilentFillClient(FillFallbackClient):
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        return {"value": True}
+
+    async def _composer_text(self, session_id, selector):
+        return ""
+
+
 class GrokRerenderClient(BskCliClient):
     def __init__(self):
         super().__init__("browser", poll_interval=0)
@@ -617,6 +626,31 @@ async def test_gemini_accepts_verified_value_when_fill_reports_target_change():
 
 
 @pytest.mark.asyncio
+async def test_gemini_native_insert_dispatches_input_event_after_fill_rerender():
+    client = FillFallbackClient()
+
+    await client._enter_prompt("session", "gemini", "@stale", "hello")
+
+    insertion = next(
+        call[1]
+        for call in reversed(client.calls)
+        if call[0] == "evaluate" and "insertText" in call[1]
+    )
+    assert "querySelectorAll" in insertion
+    assert "target.focus()" in insertion
+    assert "dispatchEvent(new InputEvent('input'" in insertion
+
+
+@pytest.mark.asyncio
+async def test_gemini_does_not_trust_unverified_successful_fill():
+    client = GeminiSilentFillClient()
+
+    await client._enter_prompt("session", "gemini", "@e47", "hello")
+
+    assert any(call[0] == "evaluate" and "insertText" in call[1] for call in client.calls)
+
+
+@pytest.mark.asyncio
 async def test_chatgpt_submits_using_native_send_button():
     client = FillFallbackClient()
     await client._submit_prompt("session", "chatgpt", "@e42")
@@ -634,12 +668,13 @@ async def test_gemini_submits_using_native_send_button():
     assert click[:2] == (
         "click",
         'button[aria-label="发送"], button[aria-label="发送消息"], '
-        'button[aria-label="Send prompt"], button[aria-label*="Send" i]',
+        'button[aria-label*="发送" i], button[aria-label="Send prompt"], '
+        'button[aria-label*="Send" i]',
     )
 
 
 @pytest.mark.asyncio
-async def test_gemini_retries_native_send_until_submission_state_changes():
+async def test_gemini_successful_native_click_does_not_duplicate_submission():
     client = GeminiSubmitClient(
         [
             {"submitted": False},
@@ -650,7 +685,17 @@ async def test_gemini_retries_native_send_until_submission_state_changes():
 
     await client._submit_prompt("session", "gemini", "@e47")
 
-    assert client.clicks == 3
+    assert client.clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_submission_check_uses_visible_composer():
+    client = GeminiEnterSubmitClient()
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    expression = next(call[1] for call in client.calls if call[0] == "evaluate")
+    assert "find(node => node.getClientRects().length)" in expression
 
 
 @pytest.mark.asyncio

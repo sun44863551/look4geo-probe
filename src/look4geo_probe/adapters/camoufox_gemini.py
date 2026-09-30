@@ -55,6 +55,7 @@ REFUSAL_MARKERS = (
 )
 TRANSIENT_ANSWER_MARKERS = (
     "i seem to be encountering an error",
+    "i encountered an error doing what you asked",
     "something went wrong",
     "there was an error generating a response",
 )
@@ -494,7 +495,7 @@ class CamoufoxGeminiAdapter(ProbeAdapter):
         runtime: GeminiBrowserRuntime,
         profile_dir: Path,
         artifact_root: Path,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ):
         self.runtime = runtime
         self.profile_dir = Path(profile_dir)
@@ -540,7 +541,7 @@ class CamoufoxGeminiAdapter(ProbeAdapter):
         result = await self.runtime.probe(
             self.profile_dir,
             request.prompt,
-            self.timeout,
+            float(request.options.get("timeout", self.timeout)),
             artifact_dir,
         )
         finished_at = datetime.now(timezone.utc)

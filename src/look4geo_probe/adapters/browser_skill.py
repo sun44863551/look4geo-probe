@@ -696,7 +696,13 @@ class BskCliClient:
                 await self._run_json(
                     "fill", textbox_ref, "--value", prompt, "--session", session_id, timeout=timeout
                 )
-                return
+                if platform != "gemini":
+                    return
+                value = await self._composer_text(
+                    session_id, PLATFORMS[platform]["composer_selector"]
+                )
+                if value.strip() == prompt.strip():
+                    return
             except RuntimeError:
                 if platform == "gemini":
                     value = await self._composer_text(
@@ -723,7 +729,19 @@ class BskCliClient:
                     value = await self._composer_text(session_id, selector)
                     if value.strip() == prompt.strip():
                         return
-        expression = f"document.execCommand('insertText', false, {json.dumps(prompt)})"
+        expression = (
+            "(() => { const nodes = [...document.querySelectorAll("
+            + json.dumps(selector)
+            + ")]; const target = nodes.find(node => node.getClientRects().length); "
+            "if (!target) return false; target.focus(); "
+            "document.execCommand('selectAll', false, null); const inserted = "
+            "document.execCommand('insertText', false, "
+            + json.dumps(prompt)
+            + "); if (target) target.dispatchEvent(new InputEvent('input', "
+            "{bubbles:true,inputType:'insertText',data:"
+            + json.dumps(prompt)
+            + "})); return inserted; })()"
+        )
         await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
 
     async def _dismiss_blocking_overlays(self, session_id: str, platform: str) -> bool:
@@ -754,9 +772,10 @@ class BskCliClient:
     ) -> None:
         if platform == "gemini":
             state_expression = (
-                "(() => { const composer = document.querySelector(" +
+                "(() => { const composers = [...document.querySelectorAll(" +
                 json.dumps(PLATFORMS["gemini"]["composer_selector"]) +
-                "); const text = composer ? (composer.innerText || composer.textContent || "") : ""; "
+                ")]; const composer = composers.find(node => node.getClientRects().length); "
+                "const text = composer ? (composer.innerText || composer.textContent || "") : ""; "
                 "const stop = [...document.querySelectorAll('button')].some(button => "
                 "/stop/i.test((button.getAttribute('aria-label') || '') + ' ' + "
                 "(button.innerText || ''))); const conversation = /^\\/app\\/.+/.test(location.pathname); "
@@ -768,7 +787,7 @@ class BskCliClient:
                 )
                 send_ref = self._find_button_ref(
                     str(observation.get("text", "")) if isinstance(observation, dict) else "",
-                    ("Send message", "发送消息"),
+                    ("Send message", "发送消息", "发送", "发送提示"),
                 )
                 try:
                     await self._run_json(
@@ -776,10 +795,12 @@ class BskCliClient:
                         send_ref
                         or (
                             'button[aria-label="发送"], button[aria-label="发送消息"], '
+                            'button[aria-label*="发送" i], '
                             'button[aria-label="Send prompt"], button[aria-label*="Send" i]'
                         ),
                         "--session", session_id, timeout=timeout
                     )
+                    return
                 except RuntimeError:
                     await self._run_json(
                         "press",
