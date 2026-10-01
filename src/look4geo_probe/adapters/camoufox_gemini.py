@@ -36,6 +36,11 @@ SEND_SELECTOR = 'button[aria-label*="Send"], button[aria-label*="发送"]'
 STOP_SELECTOR = 'button[aria-label*="Stop"], button[aria-label*="停止"]'
 ANSWER_SELECTOR = "message-content .markdown"
 TURN_SELECTOR = "conversation-turn"
+MODE_PICKER_SELECTOR = 'button[aria-label*="Open mode picker"]'
+FLASH_MODE_SELECTOR = (
+    '[role="menuitem"]:has-text("3.8 Flash"), '
+    '[role="option"]:has-text("3.8 Flash")'
+)
 LOGIN_MARKERS = (
     "sign in to continue",
     "sign in to save activity",
@@ -249,11 +254,16 @@ class GeminiPageDriver:
 
     async def _fill_prompt(self, prompt: str) -> bool:
         for _ in range(2):
+            composer = self.page.locator(COMPOSER_SELECTOR).last
             try:
-                await self.page.locator(COMPOSER_SELECTOR).last.fill(prompt)
+                await composer.fill("")
+                await composer.press_sequentially(prompt, delay=8)
             except Exception:
-                continue
-            current = await self.page.locator(COMPOSER_SELECTOR).last.inner_text()
+                try:
+                    await composer.fill(prompt)
+                except Exception:
+                    continue
+            current = await composer.inner_text()
             if current.strip() == prompt:
                 return True
         return False
@@ -267,6 +277,39 @@ class GeminiPageDriver:
             if loop.time() >= deadline:
                 return False
             await asyncio.sleep(self.poll_interval)
+
+    async def _ensure_flash_mode(self, timeout: float = 15.0) -> bool:
+        picker = self.page.locator(MODE_PICKER_SELECTOR).last
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not await picker.count():
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(self.poll_interval)
+            picker = self.page.locator(MODE_PICKER_SELECTOR).last
+        label = (await picker.get_attribute("aria-label") or "").casefold()
+        if "3.8 flash" in label or "currently flash" in label:
+            return True
+        try:
+            await picker.click(timeout=3000)
+            flash = self.page.locator(FLASH_MODE_SELECTOR).last
+            await flash.wait_for(state="visible", timeout=5000)
+            await flash.click(timeout=3000)
+        except Exception:
+            return False
+        confirm_deadline = loop.time() + 5.0
+        while loop.time() < confirm_deadline:
+            await asyncio.sleep(self.poll_interval)
+            picker = self.page.locator(MODE_PICKER_SELECTOR).last
+            label = (await picker.get_attribute("aria-label") or "").casefold()
+            visible = (await picker.inner_text()).casefold()
+            if (
+                "3.8 flash" in label
+                or "currently flash" in label
+                or visible.strip() == "flash"
+            ):
+                return True
+        return False
 
     async def _wait_for_submission(
         self, before_url: str, before_turns: int, before_answers: int
@@ -327,6 +370,25 @@ class GeminiPageDriver:
             previous = text
             await asyncio.sleep(self.poll_interval)
 
+    async def _capture_diagnostics(
+        self, artifact_dir: Path, stem: str
+    ) -> tuple[str, ...]:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifacts: list[str] = []
+        screenshot_path = artifact_dir / f"{stem}.png"
+        try:
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            artifacts.append(str(screenshot_path))
+        except Exception:
+            pass
+        html_path = artifact_dir / f"{stem}.html"
+        try:
+            html_path.write_text(await self.page.content(), encoding="utf-8")
+            artifacts.append(str(html_path))
+        except Exception:
+            pass
+        return tuple(artifacts)
+
     async def _probe(self, prompt: str, artifact_dir: Path) -> GeminiBrowserResult:
         await self.page.goto(GEMINI_URL, wait_until="domcontentloaded")
         blocked = await self._blocking_result()
@@ -337,6 +399,15 @@ class GeminiPageDriver:
                 status=JobStatus.WAITING_FOR_LOGIN,
                 failure=FailureKind.LOGIN_REQUIRED,
                 diagnostic="Gemini composer is unavailable",
+            )
+        if not await self._ensure_flash_mode():
+            return GeminiBrowserResult(
+                status=JobStatus.FAILED,
+                failure=FailureKind.SEND_FAILED,
+                diagnostic="Gemini 3.8 Flash mode could not be confirmed",
+                artifact_paths=await self._capture_diagnostics(
+                    artifact_dir, "flash-mode"
+                ),
             )
         if not await self._fill_prompt(prompt):
             return GeminiBrowserResult(
@@ -352,6 +423,11 @@ class GeminiPageDriver:
             )
         answer = await self._wait_for_answer()
         sources = await extract_gemini_sources(self.page)
+        artifacts = (
+            await self._capture_diagnostics(artifact_dir, "refusal")
+            if any(marker in answer.casefold() for marker in REFUSAL_MARKERS)
+            else ()
+        )
         return GeminiBrowserResult(
             status=JobStatus.SUCCEEDED,
             answer=answer,
@@ -365,6 +441,7 @@ class GeminiPageDriver:
                 for source in sources
                 if source.source_role == SourceRole.SURFACED
             ),
+            artifact_paths=artifacts,
         )
 
     async def probe(
@@ -388,10 +465,12 @@ class GeminiPageDriver:
                     diagnostic="Gemini returned a transient platform error 3 times",
                 )
         except TimeoutError:
+            artifacts = await self._capture_diagnostics(artifact_dir, "timeout")
             return GeminiBrowserResult(
                 status=JobStatus.FAILED,
                 failure=FailureKind.TIMEOUT,
                 diagnostic=f"Gemini browser operation timed out after {timeout:g}s",
+                artifact_paths=artifacts,
             )
 
 

@@ -143,6 +143,16 @@ class FakeLocator:
         return self
 
     async def count(self):
+        if "Open mode picker" in self.selector:
+            self.page.mode_picker_checks += 1
+            if (
+                self.page.mode_picker_after_checks is not None
+                and self.page.mode_picker_checks < self.page.mode_picker_after_checks
+            ):
+                return 0
+            return 1
+        if "3.8 Flash" in self.selector:
+            return 1 if self.page.mode_picker_open else 0
         if "message-content" in self.selector:
             return 1 if self.page.answers else 0
         if "contenteditable" in self.selector or "prompt for Gemini" in self.selector:
@@ -170,6 +180,10 @@ class FakeLocator:
             raise RuntimeError("element detached")
         self.page.composer = value
 
+    async def press_sequentially(self, value, **kwargs):
+        self.page.sequential_type_calls += 1
+        self.page.composer += value
+
     async def inner_text(self):
         if self.selector == "body":
             return self.page.body
@@ -180,6 +194,13 @@ class FakeLocator:
         return self.page.composer
 
     async def click(self, **kwargs):
+        if "Open mode picker" in self.selector:
+            self.page.mode_picker_open = True
+            return
+        if "3.8 Flash" in self.selector:
+            self.page.mode = "Flash"
+            self.page.mode_picker_open = False
+            return
         self.page.click_calls += 1
         if self.page.send_click_fails:
             raise TimeoutError("send button unavailable")
@@ -210,6 +231,15 @@ class FakeLocator:
             self.page.composer = ""
             self.page.url = "https://gemini.google.com/app/conversation"
 
+    async def get_attribute(self, name):
+        if "Open mode picker" in self.selector and name == "aria-label":
+            return f"Open mode picker, currently {self.page.mode}"
+        return None
+
+    async def wait_for(self, **kwargs):
+        if not await self.count():
+            raise TimeoutError("element unavailable")
+
 
 class FakePage:
     def __init__(
@@ -228,6 +258,8 @@ class FakePage:
         silent_clear_attempts=0,
         responses=(),
         response_bodies=(),
+        mode="Flash",
+        mode_picker_after_checks=None,
     ):
         self.body = body
         self.has_composer = has_composer
@@ -244,8 +276,13 @@ class FakePage:
         self.silent_clear_attempts = silent_clear_attempts
         self.responses = list(responses)
         self.response_bodies = list(response_bodies)
+        self.mode = mode
+        self.mode_picker_open = False
+        self.mode_picker_after_checks = mode_picker_after_checks
+        self.mode_picker_checks = 0
         self.composer = ""
         self.fill_calls = 0
+        self.sequential_type_calls = 0
         self.click_calls = 0
         self.press_calls = 0
         self.locator_calls: list[str] = []
@@ -258,6 +295,12 @@ class FakePage:
         if self.navigation_timeout:
             raise TimeoutError("navigation timed out")
         self.url = url
+
+    async def screenshot(self, *, path, **kwargs):
+        Path(path).write_bytes(b"png")
+
+    async def content(self):
+        return "<html><body>diagnostic page</body></html>"
 
     def locator(self, selector):
         self.locator_calls.append(selector)
@@ -308,6 +351,69 @@ async def test_page_driver_re_resolves_detached_composer_and_verifies_prompt(tmp
     assert result.answer == "answer"
     assert page.fill_calls == 2
     assert page.composer == ""
+
+
+@pytest.mark.asyncio
+async def test_page_driver_types_prompt_as_real_keyboard_events(tmp_path):
+    page = FakePage()
+
+    result = await GeminiPageDriver(page).probe("exact prompt", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.sequential_type_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_page_driver_forces_flash_before_sending(tmp_path):
+    page = FakePage(mode="Pro")
+
+    result = await GeminiPageDriver(page).probe("exact prompt", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.mode == "Flash"
+
+
+@pytest.mark.asyncio
+async def test_page_driver_waits_for_delayed_flash_picker(tmp_path):
+    page = FakePage(mode="Pro", mode_picker_after_checks=3)
+
+    result = await GeminiPageDriver(page, poll_interval=0.001).probe(
+        "exact prompt", 1, tmp_path
+    )
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert page.mode == "Flash"
+    assert page.mode_picker_checks >= 3
+
+
+@pytest.mark.asyncio
+async def test_page_driver_saves_timeout_diagnostics(tmp_path):
+    page = FakePage(answers=())
+
+    result = await GeminiPageDriver(page, poll_interval=0.001).probe(
+        "exact prompt", 0.01, tmp_path
+    )
+
+    assert result.failure == FailureKind.TIMEOUT
+    assert {Path(path).name for path in result.artifact_paths} == {
+        "timeout.png",
+        "timeout.html",
+    }
+    assert all(Path(path).exists() for path in result.artifact_paths)
+
+
+@pytest.mark.asyncio
+async def test_page_driver_saves_refusal_diagnostics(tmp_path):
+    refusal = "I'm having a hard time fulfilling your request. Can I help instead?"
+    page = FakePage(answers=(refusal, refusal))
+
+    result = await GeminiPageDriver(page).probe("exact prompt", 1, tmp_path)
+
+    assert result.status == JobStatus.SUCCEEDED
+    assert {Path(path).name for path in result.artifact_paths} == {
+        "refusal.png",
+        "refusal.html",
+    }
 
 
 @pytest.mark.asyncio

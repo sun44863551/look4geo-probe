@@ -162,6 +162,65 @@ def test_textbox_lookup_accepts_current_gemini_label():
     ) == "@e44"
 
 
+class SessionStartClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser-test")
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        return {"session_id": "session-test"}
+
+
+def test_browser_commands_are_pinned_to_the_navigated_task_tab():
+    client = BskCliClient("browser-test")
+    client._session_tabs["session-test"] = 42
+
+    assert client._args_with_pinned_tab(
+        ("evaluate", "location.href", "--session", "session-test")
+    ) == (
+        "evaluate",
+        "location.href",
+        "--session",
+        "session-test",
+        "--tab-id",
+        "42",
+    )
+
+
+def test_navigation_is_not_pinned_before_the_task_tab_is_known():
+    client = BskCliClient("browser-test")
+
+    assert client._args_with_pinned_tab(
+        ("navigate", "https://gemini.google.com/app", "--session", "session-test")
+    ) == (
+        "navigate",
+        "https://gemini.google.com/app",
+        "--session",
+        "session-test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_session_starts_in_foreground_for_real_keyboard_events():
+    client = SessionStartClient()
+
+    assert await client.start("gemini") == "session-test"
+    assert client.calls == [
+        ("session", "start", "--browser", "browser-test")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_gemini_session_remains_backgrounded():
+    client = SessionStartClient()
+
+    assert await client.start("chatgpt") == "session-test"
+    assert client.calls == [
+        ("session", "start", "--browser", "browser-test", "--no-focus")
+    ]
+
+
 def test_textbox_lookup_accepts_current_logged_in_doubao_label():
     page = '@e63 textbox "发消息或按住空格说话..." [empty]'
     assert BskCliClient._find_textbox_ref(
@@ -205,6 +264,44 @@ class GeminiSilentFillClient(FillFallbackClient):
 
     async def _composer_text(self, session_id, selector):
         return ""
+
+
+class GeminiNativeInputClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+        self.value = ""
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "fill" or args[0] == "evaluate":
+            raise AssertionError("Gemini input must use native keyboard events")
+        if args[0] == "press":
+            key = args[1]
+            if key == "Backspace":
+                self.value = ""
+            elif key == "Space":
+                self.value += " "
+            elif key != "Meta+A":
+                self.value += key
+        return {"value": True}
+
+    async def _composer_text(self, session_id, selector):
+        return self.value
+
+
+class GeminiFlashModeClient(BskCliClient):
+    def __init__(self, observations):
+        super().__init__("browser", poll_interval=0)
+        self.observations = iter(observations)
+        self.clicks = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        if args[0] == "observe":
+            return {"text": next(self.observations)}
+        if args[0] == "click":
+            self.clicks.append(args[1])
+        return {"value": True}
 
 
 class GrokRerenderClient(BskCliClient):
@@ -348,12 +445,16 @@ class GeminiSubmitClient(BskCliClient):
         super().__init__("browser", poll_interval=0)
         self.states = iter(states)
         self.clicks = 0
+        self.evaluations = 0
+        self.calls = []
 
     async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
         if args[0] == "click":
             self.clicks += 1
             return {"value": True}
         if args[0] == "evaluate":
+            self.evaluations += 1
             return {"value": next(self.states)}
         return {"value": True}
 
@@ -385,6 +486,20 @@ class GeminiEnterSubmitClient(BskCliClient):
             raise RuntimeError("send button not found")
         if args[0] == "evaluate":
             return {"value": {"submitted": True}}
+        return {"value": True}
+
+
+class GeminiVisibleConversationClient(GeminiSubmitClient):
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "click":
+            self.clicks += 1
+            return {"value": True}
+        if args[0] == "evaluate":
+            self.evaluations += 1
+            return {"value": {"submitted": False}}
+        if args[0] == "observe":
+            return {"text": 'heading "You said Test prompt"\nheading "Gemini said"'}
         return {"value": True}
 
 
@@ -422,6 +537,9 @@ class DelayedAnswerClient(BskCliClient):
         return None
 
     async def _ensure_perplexity_standard_search(self, session_id):
+        return True
+
+    async def _ensure_gemini_flash(self, session_id):
         return True
 
     async def _wait_submission_ready(self, *args, **kwargs):
@@ -466,6 +584,36 @@ class SourceCollectorClient(BskCliClient):
         except StopIteration:
             pass
         return self.last_panel_page
+
+
+class GeminiMultiSourceClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+        self.focus_index = -1
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "observe":
+            return {"text": "\n".join(
+                f'@e{60 + index} button "View source details for citation from Source {index}. Press Enter to open sources dialog."'
+                for index in range(3)
+            )}
+        if args[:2] == ("press", "Enter"):
+            self.focus_index += 1
+        return {"value": True}
+
+    async def _source_panel_page(self, session_id, platform):
+        index = self.focus_index
+        return {
+            "panel_found": True,
+            "cards": [
+                {
+                    "url": f"https://source-{index}.example/product",
+                    "title": f"Source {index}",
+                }
+            ],
+        }
 
 
 class SourceFailureProbeClient(DelayedAnswerClient):
@@ -617,37 +765,46 @@ async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes
 
 
 @pytest.mark.asyncio
-async def test_gemini_accepts_verified_value_when_fill_reports_target_change():
-    client = GeminiFilledDespiteErrorClient()
+async def test_gemini_prompt_entry_uses_only_native_keyboard_events():
+    client = GeminiNativeInputClient()
 
-    await client._enter_prompt("session", "gemini", "@e47", "hello")
+    await client._enter_prompt("session", "gemini", "@e58", "Hi A")
 
-    assert [call[0] for call in client.calls] == ["fill"]
+    assert client.value == "Hi A"
+    assert [call[:2] for call in client.calls] == [
+        ("press", "Meta+A"),
+        ("press", "Backspace"),
+        ("press", "H"),
+        ("press", "i"),
+        ("press", "Space"),
+        ("press", "A"),
+    ]
+    assert all("--ref" in call and "@e58" in call for call in client.calls)
+    assert all("--selector" not in call for call in client.calls)
 
 
 @pytest.mark.asyncio
-async def test_gemini_native_insert_dispatches_input_event_after_fill_rerender():
-    client = FillFallbackClient()
-
-    await client._enter_prompt("session", "gemini", "@stale", "hello")
-
-    insertion = next(
-        call[1]
-        for call in reversed(client.calls)
-        if call[0] == "evaluate" and "insertText" in call[1]
+async def test_gemini_mode_is_switched_from_pro_to_flash_and_verified():
+    client = GeminiFlashModeClient(
+        [
+            '@e57 button "Open mode picker, currently Pro [has-submenu]"',
+            '@e62 menuitem "3.8 Flash Set as default model All-around help"',
+            '@e60 button "Open mode picker, currently Flash [has-submenu]"',
+        ]
     )
-    assert "querySelectorAll" in insertion
-    assert "target.focus()" in insertion
-    assert "dispatchEvent(new InputEvent('input'" in insertion
+
+    assert await client._ensure_gemini_flash("session") is True
+    assert client.clicks == ["@e57", "@e62"]
 
 
 @pytest.mark.asyncio
-async def test_gemini_does_not_trust_unverified_successful_fill():
-    client = GeminiSilentFillClient()
+async def test_gemini_accepts_versioned_flash_mode_label():
+    client = GeminiFlashModeClient(
+        ['@e60 button "Open mode picker, currently 3.8 Flash [has-submenu]"']
+    )
 
-    await client._enter_prompt("session", "gemini", "@e47", "hello")
-
-    assert any(call[0] == "evaluate" and "insertText" in call[1] for call in client.calls)
+    assert await client._ensure_gemini_flash("session") is True
+    assert client.clicks == []
 
 
 @pytest.mark.asyncio
@@ -679,6 +836,9 @@ async def test_gemini_successful_native_click_does_not_duplicate_submission():
         [
             {"submitted": False},
             {"submitted": False},
+            {"submitted": False},
+            {"submitted": False},
+            {"submitted": False},
             {"submitted": True},
         ]
     )
@@ -686,6 +846,30 @@ async def test_gemini_successful_native_click_does_not_duplicate_submission():
     await client._submit_prompt("session", "gemini", "@e47")
 
     assert client.clicks == 1
+    assert client.evaluations == 6
+
+
+@pytest.mark.asyncio
+async def test_gemini_visible_conversation_confirms_submission_when_dom_lags():
+    client = GeminiVisibleConversationClient([])
+
+    await client._submit_prompt("session", "gemini", "@e47")
+
+    assert client.clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_click_success_is_not_submission_until_page_state_changes():
+    client = GeminiSubmitClient(
+        [{"submitted": False}] * 30
+    )
+
+    with pytest.raises(RuntimeError, match="submission state did not change"):
+        await client._submit_prompt("session", "gemini", "@e47")
+
+    assert client.clicks == 1
+    assert client.evaluations == 30
+    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -696,6 +880,8 @@ async def test_gemini_submission_check_uses_visible_composer():
 
     expression = next(call[1] for call in client.calls if call[0] == "evaluate")
     assert "find(node => node.getClientRects().length)" in expression
+    assert "user-query" in expression
+    assert "|| !text.trim()" in expression
 
 
 @pytest.mark.asyncio
@@ -962,7 +1148,7 @@ async def test_domestic_platforms_keep_citations_when_panel_open_fails(platform)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "grok"])
+@pytest.mark.parametrize("platform", ["chatgpt", "grok"])
 async def test_international_platforms_collect_cited_and_surfaced_fixture_sources(platform):
     fixture = load_source_fixture(platform)
     panel_page = {"panel_found": True, "cards": fixture["panel_cards"]}
@@ -988,7 +1174,27 @@ async def test_international_platforms_collect_cited_and_surfaced_fixture_source
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "perplexity", "grok"])
+async def test_gemini_collects_every_visible_citation_dialog_source():
+    client = GeminiMultiSourceClient()
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "gemini", []
+    )
+
+    assert [source.url for source in sources] == [
+        "https://source-0.example/product",
+        "https://source-1.example/product",
+        "https://source-2.example/product",
+    ]
+    assert all(source.source_role == SourceRole.SURFACED for source in sources)
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 3
+    assert sum(call[:2] == ("press", "Escape") for call in client.calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["chatgpt", "perplexity", "grok"])
 async def test_international_platforms_report_none_exposed_without_trigger(platform):
     client = SourceCollectorClient([{"found": False, "opened": False}])
 
@@ -1002,7 +1208,7 @@ async def test_international_platforms_report_none_exposed_without_trigger(platf
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["chatgpt", "gemini", "grok"])
+@pytest.mark.parametrize("platform", ["chatgpt", "grok"])
 async def test_international_platforms_keep_citations_when_panel_open_fails(platform):
     fixture = load_source_fixture(platform)
     client = SourceCollectorClient(
@@ -1381,6 +1587,7 @@ class FakeBrowserClient:
         self.stopped = []
         self.last_prompt = None
         self.last_timeout = None
+        self.timeouts = []
 
     async def start(self, platform):
         self.started.append(platform)
@@ -1389,6 +1596,7 @@ class FakeBrowserClient:
     async def probe(self, session_id, platform, prompt, timeout):
         self.last_prompt = prompt
         self.last_timeout = timeout
+        self.timeouts.append(timeout)
         if self.error:
             raise self.error
         if self.outputs:
@@ -1556,7 +1764,9 @@ async def test_gemini_retries_transient_web_failures_within_one_timeout_budget(
     assert attempt.raw_answer == "A complete Gemini Web answer."
     assert client.started == ["gemini", "gemini", "gemini"]
     assert client.stopped == ["session-1", "session-2", "session-3"]
-    assert client.last_timeout == 100
+    assert len(client.timeouts) == 3
+    assert all(0 < timeout <= 300 for timeout in client.timeouts)
+    assert all(timeout > 299 for timeout in client.timeouts)
 
 
 @pytest.mark.asyncio

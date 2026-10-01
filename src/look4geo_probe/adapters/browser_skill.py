@@ -208,6 +208,9 @@ PLATFORMS["grok"].update(
 )
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 BUTTON_REF_PATTERN = re.compile(r"(@e\d+)\s+button\s+\"([^\"]+)\"")
+CONTROL_REF_PATTERN = re.compile(
+    r"(@e\d+)\s+(?:button|menuitem)\s+\"([^\"]+)\""
+)
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}\u200b\u2060]+")
 
 
@@ -445,8 +448,19 @@ class BskCliClient:
             raise ValueError("browser_instance_id is required")
         self.browser_instance_id = browser_instance_id
         self.poll_interval = poll_interval
+        self._session_tabs: dict[str, int] = {}
+
+    def _args_with_pinned_tab(self, args: tuple[str, ...]) -> tuple[str, ...]:
+        if "--tab-id" in args or "--session" not in args:
+            return args
+        session_index = args.index("--session") + 1
+        if session_index >= len(args):
+            return args
+        tab_id = self._session_tabs.get(args[session_index])
+        return args + ("--tab-id", str(tab_id)) if tab_id is not None else args
 
     async def _run_json(self, *args: str, timeout: float = 30.0) -> dict | list:
+        args = self._args_with_pinned_tab(args)
         process = await asyncio.create_subprocess_exec(
             "bsk",
             *args,
@@ -460,9 +474,10 @@ class BskCliClient:
         return json.loads(stdout.decode("utf-8"))
 
     async def start(self, platform: str) -> str:
-        result = await self._run_json(
-            "session", "start", "--browser", self.browser_instance_id, "--no-focus"
-        )
+        args = ["session", "start", "--browser", self.browser_instance_id]
+        if platform != "gemini":
+            args.append("--no-focus")
+        result = await self._run_json(*args)
         return str(result["session_id"])
 
     async def probe(
@@ -472,6 +487,8 @@ class BskCliClient:
         navigation = await self._run_json(
             "navigate", config["url"], "--session", session_id, timeout=timeout
         )
+        if isinstance(navigation, dict) and navigation.get("tab_id") is not None:
+            self._session_tabs[session_id] = int(navigation["tab_id"])
         await self._dismiss_blocking_overlays(session_id, platform)
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
@@ -501,6 +518,21 @@ class BskCliClient:
                 failure=FailureKind.SEND_FAILED,
                 diagnostic="Perplexity standard search mode could not be confirmed",
             )
+        if platform == "gemini":
+            flash_confirmed = False
+            for _ in range(3):
+                try:
+                    flash_confirmed = await self._ensure_gemini_flash(session_id)
+                except RuntimeError:
+                    flash_confirmed = False
+                if flash_confirmed:
+                    break
+                await asyncio.sleep(self.poll_interval)
+            if not flash_confirmed:
+                return BrowserProbeOutput(
+                    failure=FailureKind.SEND_FAILED,
+                    diagnostic="Gemini Flash mode could not be confirmed",
+                )
 
         baseline_page = await self._answer_page(session_id, config["answer_selector"])
         baseline = [str(value) for value in baseline_page.get("answers", [])]
@@ -634,6 +666,30 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "gemini":
+            selector = PLATFORMS[platform]["composer_selector"]
+            target = ("--ref", textbox_ref) if textbox_ref else ("--selector", selector)
+            await self._run_json(
+                "press", "Meta+A", *target,
+                "--session", session_id, timeout=timeout,
+            )
+            await self._run_json(
+                "press", "Backspace", *target,
+                "--session", session_id, timeout=timeout,
+            )
+            for character in prompt:
+                key = (
+                    "Space" if character == " "
+                    else "Shift+Enter" if character == "\n"
+                    else character
+                )
+                await self._run_json(
+                    "press", key, *target,
+                    "--session", session_id, timeout=timeout,
+                )
+            if (await self._composer_text(session_id, selector)).strip() != prompt.strip():
+                raise RuntimeError("Gemini native prompt entry could not be verified")
+            return
         if platform == "grok":
             candidate_ref = textbox_ref
             selector = PLATFORMS[platform]["composer_selector"]
@@ -815,9 +871,13 @@ class BskCliClient:
                 "const stop = [...document.querySelectorAll('button')].some(button => "
                 "/stop/i.test((button.getAttribute('aria-label') || '') + ' ' + "
                 "(button.innerText || ''))); const conversation = /^\\/app\\/.+/.test(location.pathname); "
-                "return {submitted: stop || conversation || !text.trim()}; })()"
+                "const answer = document.querySelector('message-content .markdown'); "
+                "const userQuery = document.querySelector('user-query, .query-text, .user-query'); "
+                "return {submitted: stop || conversation || Boolean(answer) || Boolean(userQuery) || !text.trim(), "
+                "composerEmpty: !text.trim(), conversation, answer: Boolean(answer), "
+                "userQuery: Boolean(userQuery)}; })()"
             )
-            for _ in range(3):
+            for attempt in range(3):
                 observation = await self._run_json(
                     "observe", "--session", session_id, timeout=timeout
                 )
@@ -826,17 +886,27 @@ class BskCliClient:
                     ("Send message", "发送消息", "发送", "发送提示"),
                 )
                 try:
-                    await self._run_json(
-                        "click",
-                        send_ref
-                        or (
-                            'button[aria-label="发送"], button[aria-label="发送消息"], '
-                            'button[aria-label*="发送" i], '
-                            'button[aria-label="Send prompt"], button[aria-label*="Send" i]'
-                        ),
-                        "--session", session_id, timeout=timeout
-                    )
-                    return
+                    if attempt == 0:
+                        await self._run_json(
+                            "click",
+                            send_ref
+                            or (
+                                'button[aria-label="发送"], button[aria-label="发送消息"], '
+                                'button[aria-label*="发送" i], '
+                                'button[aria-label="Send prompt"], button[aria-label*="Send" i]'
+                            ),
+                            "--session", session_id, timeout=timeout
+                        )
+                    else:
+                        await self._run_json(
+                            "press",
+                            "Enter",
+                            "--selector",
+                            PLATFORMS[platform]["composer_selector"],
+                            "--session",
+                            session_id,
+                            timeout=timeout,
+                        )
                 except RuntimeError:
                     await self._run_json(
                         "press",
@@ -847,13 +917,22 @@ class BskCliClient:
                         session_id,
                         timeout=timeout,
                     )
-                await asyncio.sleep(self.poll_interval)
-                result = await self._run_json(
-                    "evaluate", state_expression, "--session", session_id, timeout=timeout
-                )
-                state = self._result_value(result)
-                if state is True or (isinstance(state, dict) and state.get("submitted")):
-                    return
+                for _ in range(10):
+                    await asyncio.sleep(self.poll_interval)
+                    result = await self._run_json(
+                        "evaluate", state_expression, "--session", session_id, timeout=timeout
+                    )
+                    state = self._result_value(result)
+                    if state is True or (
+                        isinstance(state, dict) and state.get("submitted")
+                    ):
+                        return
+                    visible = await self._run_json(
+                        "observe", "--session", session_id, timeout=timeout
+                    )
+                    visible_text = str(visible.get("text", ""))
+                    if "You said" in visible_text or "Gemini said" in visible_text:
+                        return
             raise RuntimeError("Gemini submission state did not change after 3 attempts")
         if platform == "chatgpt":
             try:
@@ -949,6 +1028,44 @@ class BskCliClient:
             await asyncio.sleep(self.poll_interval)
         return False
 
+    async def _ensure_gemini_flash(self, session_id: str) -> bool:
+        observation = await self._run_json(
+            "observe", "--session", session_id, timeout=30
+        )
+        page_text = str(observation.get("text", ""))
+        if re.search(r"Open mode picker, currently [^\"\n]*Flash", page_text, re.I):
+            return True
+        picker_ref = self._find_control_ref(
+            page_text, ("Open mode picker, currently",)
+        )
+        if picker_ref is None:
+            return False
+        await self._run_json("click", picker_ref, "--session", session_id, timeout=30)
+        flash_ref = None
+        for _ in range(5):
+            menu = await self._run_json("observe", "--session", session_id, timeout=30)
+            flash_ref = self._find_control_ref(
+                str(menu.get("text", "")), ("3.8 Flash", "Flash")
+            )
+            if flash_ref is not None:
+                break
+            await asyncio.sleep(self.poll_interval)
+        if flash_ref is None:
+            return False
+        await self._run_json("click", flash_ref, "--session", session_id, timeout=30)
+        for _ in range(5):
+            verified = await self._run_json(
+                "observe", "--session", session_id, timeout=30
+            )
+            if re.search(
+                r"Open mode picker, currently [^\"\n]*Flash",
+                str(verified.get("text", "")),
+                re.I,
+            ):
+                return True
+            await asyncio.sleep(self.poll_interval)
+        return False
+
     async def _current_url(self, session_id: str) -> str:
         result = await self._run_json(
             "evaluate", "location.href", "--session", session_id, timeout=30
@@ -1026,6 +1143,29 @@ class BskCliClient:
                 None,
             )
 
+        if platform == "gemini":
+            try:
+                cards = await self._collect_gemini_source_cards(session_id)
+            except Exception as error:
+                return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
+            for card in cards:
+                record = self._source_record(
+                    card,
+                    role=SourceRole.SURFACED,
+                    origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                    excluded_domains=excluded_domains,
+                )
+                if record is not None:
+                    candidates.append(record)
+            sources = merge_sources(candidates)
+            return (
+                sources,
+                SourceCaptureStatus.CAPTURED
+                if sources
+                else SourceCaptureStatus.NONE_EXPOSED,
+                None,
+            )
+
         has_source_rule = bool(
             config["source_trigger_labels"] or config["source_trigger_selectors"]
         )
@@ -1093,6 +1233,33 @@ class BskCliClient:
             else SourceCaptureStatus.NONE_EXPOSED
         )
         return sources, status, None
+
+    async def _collect_gemini_source_cards(self, session_id: str) -> list[dict]:
+        observation = await self._run_json(
+            "observe", "--session", session_id, timeout=30
+        )
+        source_refs = [
+            ref
+            for ref, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
+            if "View source details" in label
+        ]
+        cards: list[dict] = []
+        for index, source_ref in enumerate(source_refs):
+            await self._run_json(
+                "press", "Enter", "--ref", source_ref,
+                "--session", session_id, timeout=30,
+            )
+            panel_page: dict = {"panel_found": False, "cards": []}
+            for _ in range(4):
+                panel_page = await self._source_panel_page(session_id, "gemini")
+                if panel_page.get("panel_found"):
+                    break
+                await asyncio.sleep(self.poll_interval)
+            if not panel_page.get("panel_found"):
+                raise RuntimeError(f"Gemini source dialog {index + 1} did not open")
+            cards.extend(list(panel_page.get("cards", [])))
+            await self._run_json("press", "Escape", "--session", session_id, timeout=30)
+        return cards
 
     @staticmethod
     def _source_record(
@@ -1196,7 +1363,10 @@ class BskCliClient:
         return nested if nested is not None else result
 
     async def stop(self, session_id: str) -> None:
-        await self._run_json("session", "stop", session_id)
+        try:
+            await self._run_json("session", "stop", session_id)
+        finally:
+            self._session_tabs.pop(session_id, None)
 
     @staticmethod
     def _find_textbox_ref(
@@ -1212,6 +1382,13 @@ class BskCliClient:
     def _find_button_ref(page_text: str, expected_labels: tuple[str, ...]) -> str | None:
         for ref, label in BUTTON_REF_PATTERN.findall(page_text):
             if label in expected_labels:
+                return ref
+        return None
+
+    @staticmethod
+    def _find_control_ref(page_text: str, label_fragments: tuple[str, ...]) -> str | None:
+        for ref, label in CONTROL_REF_PATTERN.findall(page_text):
+            if any(fragment in label for fragment in label_fragments):
                 return ref
         return None
 
@@ -1261,9 +1438,20 @@ class BrowserSkillAdapter(ProbeAdapter):
                 )
             )
             max_attempts = 3 if platform == "gemini" else 1
-            attempt_timeout = total_timeout / max_attempts
             retryable = {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
+            deadline = asyncio.get_running_loop().time() + total_timeout
             for attempt_index in range(max_attempts):
+                attempt_timeout = (
+                    deadline - asyncio.get_running_loop().time()
+                    if platform == "gemini"
+                    else total_timeout
+                )
+                if attempt_timeout <= 0:
+                    output = BrowserProbeOutput(
+                        failure=FailureKind.TIMEOUT,
+                        diagnostic=f"timeout after {total_timeout:g}s total budget",
+                    )
+                    break
                 session_id = await self.client.start(platform)
                 try:
                     output = await self.client.probe(

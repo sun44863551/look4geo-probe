@@ -91,6 +91,7 @@ def test_disabling_camoufox_restores_previous_gemini_chain(tmp_path, monkeypatch
 
 def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "browser-test")
+    monkeypatch.setenv("LOOK4GEO_CAMOUFOX_ENABLED", "1")
     monkeypatch.setenv("LOOK4GEO_CAMOUFOX_DISABLE_CONTENT_SANDBOX", "1")
 
     adapters = build_adapters(tmp_path)
@@ -100,6 +101,10 @@ def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch)
         if adapter.name == "camoufox_gemini"
     )
 
+    assert adapters["gemini"].adapter_names == [
+        "browser_skill",
+        "camoufox_gemini",
+    ]
     assert camoufox.runtime.disable_content_sandbox is True
 
 
