@@ -26,6 +26,17 @@ cd "$project_root"
 mkdir -p vendor tools/promptfoo
 git submodule update --init --recursive vendor/AI-Search-Hub
 
+ai_hub_dir="$project_root/vendor/AI-Search-Hub"
+ai_hub_patch="$project_root/patches/ai-search-hub-gemini-native-input.patch"
+if git -C "$ai_hub_dir" apply --reverse --check "$ai_hub_patch" >/dev/null 2>&1; then
+  : # The patch is already applied.
+elif git -C "$ai_hub_dir" apply --check "$ai_hub_patch" >/dev/null 2>&1; then
+  git -C "$ai_hub_dir" apply "$ai_hub_patch"
+else
+  printf '%s\n' "Cannot apply required AI-Search-Hub Gemini patch; inspect vendor/AI-Search-Hub for conflicting changes." >&2
+  exit 1
+fi
+
 if [ ! -f tools/promptfoo/package.json ]; then
   npm init --yes --prefix tools/promptfoo >/dev/null
 fi

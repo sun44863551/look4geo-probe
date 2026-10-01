@@ -1,0 +1,23 @@
+diff --git a/scripts/site_chat_core.py b/scripts/site_chat_core.py
+index a2dd3d3..257c166 100644
+--- a/scripts/site_chat_core.py
++++ b/scripts/site_chat_core.py
+@@ -537,6 +537,18 @@ def fill_question(page: Page, input_box: Locator, question: str) -> None:
+ 
+ 
+ def fill_question_for_site(site_name: str, page: Page, input_box: Locator, question: str) -> None:
++    if site_name == "gemini":
++        # Gemini's Quill editor can accept locator.fill() visually while leaving
++        # its internal model stale. Use real keyboard events so Send creates a
++        # conversation instead of silently clearing the composer.
++        input_box.click()
++        page.wait_for_timeout(300)
++        page.keyboard.press(select_all_shortcut())
++        page.keyboard.press("Backspace")
++        page.keyboard.type(question, delay=20)
++        page.wait_for_timeout(500)
++        return
++
+     if site_name == "qwen":
+         try:
+             input_box.fill(question)
