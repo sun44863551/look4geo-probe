@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 
 import yaml
@@ -6,6 +7,20 @@ import yaml
 from look4geo_probe.runtime import build_adapters
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_chatgpt_requires_a_separate_browser_and_never_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "daily-browser")
+    for dedicated_id in ("", "daily-browser", "sampling-browser"):
+        monkeypatch.setenv("LOOK4GEO_CHATGPT_BROWSER_ID", dedicated_id)
+        adapters = build_adapters(tmp_path)
+        chatgpt = adapters["chatgpt"]
+        assert len(chatgpt.adapters) == 1
+        client = chatgpt.adapters[0].client
+        expected = dedicated_id == "sampling-browser"
+        assert asyncio.run(chatgpt.health("chatgpt")).ok is expected
+        assert client.browser_instance_id == ("sampling-browser" if expected else "")
+        assert adapters["deepseek"].adapters[0].client.browser_instance_id == "daily-browser"
 
 
 def read_frontmatter(path: Path) -> dict:
@@ -87,6 +102,17 @@ def test_disabling_camoufox_restores_previous_gemini_chain(tmp_path, monkeypatch
     adapters = build_adapters(tmp_path, runtime="default")
 
     assert adapters["gemini"].adapter_names == ["browser_skill"]
+
+
+def test_gemini_camoufox_only_avoids_mixing_accounts(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "shared-browser")
+    monkeypatch.setenv("LOOK4GEO_CAMOUFOX_ENABLED", "1")
+    monkeypatch.setenv("LOOK4GEO_GEMINI_CAMOUFOX_ONLY", "1")
+
+    adapters = build_adapters(tmp_path)
+
+    assert adapters["gemini"].adapter_names == ["camoufox_gemini"]
+    assert adapters["deepseek"].adapter_names == ["browser_skill"]
 
 
 def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch):

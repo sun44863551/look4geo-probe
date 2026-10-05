@@ -140,10 +140,16 @@ def test_textbox_lookup_accepts_current_perplexity_label():
 
 
 def test_textbox_lookup_accepts_current_chatgpt_label():
-    page = '@e17 textbox "询问 ChatGPT" [empty]'
+    page = '@e17 textbox "与 ChatGPT 聊天" [empty]'
     assert BskCliClient._find_textbox_ref(
         page, PLATFORMS["chatgpt"]["textbox"]
     ) == "@e17"
+
+
+def test_chatgpt_extracts_only_current_assistant_markdown():
+    assert PLATFORMS["chatgpt"]["answer_selector"] == (
+        '[data-message-author-role="assistant"] .markdown'
+    )
 
 
 def test_baidu_uses_current_official_entry_and_stable_dom_boundaries():
@@ -459,6 +465,54 @@ class GeminiSubmitClient(BskCliClient):
         return {"value": True}
 
 
+class ChatGPTSubmitClient(BskCliClient):
+    def __init__(self, states):
+        super().__init__("browser", poll_interval=0)
+        self.states = iter(states)
+        self.calls = []
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "evaluate":
+            return {"value": next(self.states)}
+        return {"value": True}
+
+
+class ChatGPTLocaleClient(BskCliClient):
+    def __init__(self, document_language="en"):
+        super().__init__("browser", poll_interval=0)
+        self.calls = []
+        self.document_language = document_language
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.calls.append(args)
+        if args[0] == "evaluate":
+            if "navigator.userAgent" in args[1]:
+                return {"value": "Mozilla/5.0 TestBrowser"}
+            return {"value": {"navigatorLanguage": "en-US", "documentLanguage": self.document_language}}
+        return {"applied": {"accept_language": "en-US,en"}}
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_locale_override_uses_real_user_agent_before_navigation():
+    client = ChatGPTLocaleClient()
+
+    await client._set_chatgpt_english_locale("session")
+
+    assert [call[0] for call in client.calls] == ["evaluate", "emulate"]
+    assert client.calls[1] == (
+        "emulate", "--ua", "Mozilla/5.0 TestBrowser",
+        "--accept-language", "en-US,en", "--session", "session",
+    )
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_locale_check_rejects_chinese_page():
+    client = ChatGPTLocaleClient(document_language="zh-CN")
+
+    assert await client._chatgpt_english_locale_ready("session") is False
+
+
 class GeminiObservedSubmitClient(BskCliClient):
     def __init__(self):
         super().__init__("browser", poll_interval=0)
@@ -535,6 +589,12 @@ class DelayedAnswerClient(BskCliClient):
 
     async def _enter_prompt(self, *args, **kwargs):
         return None
+
+    async def _set_chatgpt_english_locale(self, session_id):
+        return None
+
+    async def _chatgpt_english_locale_ready(self, session_id):
+        return True
 
     async def _ensure_perplexity_standard_search(self, session_id):
         return True
@@ -772,6 +832,7 @@ async def test_gemini_prompt_entry_uses_only_native_keyboard_events():
 
     assert client.value == "Hi A"
     assert [call[:2] for call in client.calls] == [
+        ("click", "@e58"),
         ("press", "Meta+A"),
         ("press", "Backspace"),
         ("press", "H"),
@@ -779,7 +840,7 @@ async def test_gemini_prompt_entry_uses_only_native_keyboard_events():
         ("press", "Space"),
         ("press", "A"),
     ]
-    assert all("--ref" in call and "@e58" in call for call in client.calls)
+    assert all("@e58" in call for call in client.calls)
     assert all("--selector" not in call for call in client.calls)
 
 
@@ -809,12 +870,33 @@ async def test_gemini_accepts_versioned_flash_mode_label():
 
 @pytest.mark.asyncio
 async def test_chatgpt_submits_using_native_send_button():
-    client = FillFallbackClient()
+    client = ChatGPTSubmitClient([{"submitted": True}])
     await client._submit_prompt("session", "chatgpt", "@e42")
-    assert client.calls[-1][:2] == (
+    click = next(call for call in client.calls if call[0] == "click")
+    assert click[:2] == (
         "click",
-        'button[aria-label="发送"], button[aria-label="Send prompt"]',
+        'button[aria-label*="发送" i], button[aria-label*="Send" i]',
     )
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_click_without_submission_retries_enter_and_confirms():
+    client = ChatGPTSubmitClient([{"submitted": False}] * 3 + [{"submitted": True}])
+
+    await client._submit_prompt("session", "chatgpt", "@e42")
+
+    assert sum(call[0] == "click" for call in client.calls) == 1
+    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_reports_send_failure_without_waiting_for_answer_timeout():
+    client = ChatGPTSubmitClient([{"submitted": False}] * 9)
+
+    with pytest.raises(RuntimeError, match="ChatGPT submission state did not change"):
+        await client._submit_prompt("session", "chatgpt", "@e42")
+
+    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 2
 
 
 @pytest.mark.asyncio

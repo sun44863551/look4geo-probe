@@ -12,6 +12,7 @@ from .types import AdapterHealth
 from ..browser_lock import BrowserOperationLock
 from ..models import (
     FailureKind,
+    BuyerBaseline,
     JobStatus,
     PlatformAttempt,
     ProbeRequest,
@@ -45,11 +46,11 @@ PLATFORMS = {
     },
     "chatgpt": {
         "url": "https://chatgpt.com/",
-        "textbox": ("给 ChatGPT 发消息", "询问 ChatGPT"),
+        "textbox": ("给 ChatGPT 发消息", "询问 ChatGPT", "与 ChatGPT 聊天", "Chat with ChatGPT"),
         "composer_selector": 'div[contenteditable="true"]',
         "login_markers": ("登录", "注册"),
         "conversation_marker": "/c/",
-        "answer_selector": '[class*="MarkdownRoot-"]',
+        "answer_selector": '[data-message-author-role="assistant"] .markdown',
     },
     "deepseek": {
         "url": "https://chat.deepseek.com/",
@@ -443,12 +444,14 @@ def submission_confirmed(
 
 
 class BskCliClient:
-    def __init__(self, browser_instance_id: str, *, poll_interval: float = 2.0):
-        if not browser_instance_id:
+    def __init__(self, browser_instance_id: str, *, poll_interval: float = 2.0, allow_unconfigured: bool = False):
+        if not browser_instance_id and not allow_unconfigured:
             raise ValueError("browser_instance_id is required")
         self.browser_instance_id = browser_instance_id
         self.poll_interval = poll_interval
         self._session_tabs: dict[str, int] = {}
+        self._buyer_locales: dict[str, str] = {}
+        self._locale_verified: dict[str, bool] = {}
 
     def _args_with_pinned_tab(self, args: tuple[str, ...]) -> tuple[str, ...]:
         if "--tab-id" in args or "--session" not in args:
@@ -474,6 +477,12 @@ class BskCliClient:
         return json.loads(stdout.decode("utf-8"))
 
     async def start(self, platform: str) -> str:
+        if not self.browser_instance_id:
+            raise RuntimeError(
+                "ChatGPT sampling is suspended: configure LOOK4GEO_CHATGPT_BROWSER_ID "
+                "from the dedicated sampling Chrome profile; it must differ from "
+                "LOOK4GEO_BROWSER_ID. No shared browser fallback is allowed."
+            )
         args = ["session", "start", "--browser", self.browser_instance_id]
         if platform != "gemini":
             args.append("--no-focus")
@@ -484,11 +493,18 @@ class BskCliClient:
         self, session_id: str, platform: str, prompt: str, timeout: float
     ) -> BrowserProbeOutput:
         config = PLATFORMS[platform]
+        if platform == "chatgpt":
+            await self._set_chatgpt_english_locale(session_id)
         navigation = await self._run_json(
             "navigate", config["url"], "--session", session_id, timeout=timeout
         )
         if isinstance(navigation, dict) and navigation.get("tab_id") is not None:
             self._session_tabs[session_id] = int(navigation["tab_id"])
+        if platform == "chatgpt" and not await self._chatgpt_english_locale_ready(session_id):
+            return BrowserProbeOutput(
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="ChatGPT browser/page locale not confirmed; sample excluded from requested buyer baseline",
+            )
         await self._dismiss_blocking_overlays(session_id, platform)
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
@@ -669,6 +685,10 @@ class BskCliClient:
         if platform == "gemini":
             selector = PLATFORMS[platform]["composer_selector"]
             target = ("--ref", textbox_ref) if textbox_ref else ("--selector", selector)
+            await self._run_json(
+                "click", textbox_ref or selector, "--session", session_id,
+                timeout=timeout,
+            )
             await self._run_json(
                 "press", "Meta+A", *target,
                 "--session", session_id, timeout=timeout,
@@ -935,14 +955,43 @@ class BskCliClient:
                         return
             raise RuntimeError("Gemini submission state did not change after 3 attempts")
         if platform == "chatgpt":
-            try:
-                await self._run_json(
-                    "click", 'button[aria-label="发送"], button[aria-label="Send prompt"]',
-                    "--session", session_id, timeout=timeout
-                )
-                return
-            except RuntimeError:
-                pass
+            state_expression = (
+                "(() => { const composer = [...document.querySelectorAll("
+                + json.dumps(PLATFORMS["chatgpt"]["composer_selector"])
+                + ")].find(node => node.getClientRects().length); "
+                "const text = composer ? (composer.innerText || composer.textContent || '') : ''; "
+                "const generating = [...document.querySelectorAll('button')].some(button => "
+                "button.getClientRects().length && /停止生成|Stop generating|Stop response/i.test("
+                "(button.getAttribute('aria-label') || '') + ' ' + (button.innerText || ''))); "
+                "return {submitted: generating || Boolean(composer && !text.trim())}; })()"
+            )
+            for attempt in range(3):
+                try:
+                    if attempt == 0:
+                        await self._run_json(
+                            "click",
+                            'button[aria-label*="发送" i], button[aria-label*="Send" i]',
+                            "--session", session_id, timeout=timeout,
+                        )
+                    else:
+                        await self._run_json(
+                            "press", "Enter", "--selector",
+                            PLATFORMS[platform]["composer_selector"],
+                            "--session", session_id, timeout=timeout,
+                        )
+                except RuntimeError:
+                    if attempt == 2:
+                        raise
+                for _ in range(3):
+                    result = await self._run_json(
+                        "evaluate", state_expression, "--session", session_id,
+                        timeout=timeout,
+                    )
+                    state = self._result_value(result)
+                    if isinstance(state, dict) and state.get("submitted"):
+                        return
+                    await asyncio.sleep(self.poll_interval)
+            raise RuntimeError("ChatGPT submission state did not change after 3 attempts")
         if platform == "perplexity":
             try:
                 await self._run_json(
@@ -993,6 +1042,35 @@ class BskCliClient:
             "evaluate", expression, "--session", session_id, timeout=30
         )
         return str(self._result_value(result) or "")
+
+    async def _set_chatgpt_english_locale(self, session_id: str) -> None:
+        user_agent_result = await self._run_json(
+            "evaluate", "navigator.userAgent", "--session", session_id
+        )
+        user_agent = self._result_value(user_agent_result)
+        if not isinstance(user_agent, str) or not user_agent.strip():
+            raise RuntimeError("ChatGPT English locale setup failed: browser user agent unavailable")
+        await self._run_json(
+            "emulate", "--ua", user_agent, "--accept-language",
+            self._buyer_locales.get(session_id, "en-US") + "," + self._buyer_locales.get(session_id, "en-US").split("-")[0],
+            "--session", session_id,
+        )
+
+    async def _chatgpt_english_locale_ready(self, session_id: str) -> bool:
+        result = await self._run_json(
+            "evaluate",
+            "({navigatorLanguage:navigator.language,documentLanguage:document.documentElement.lang})",
+            "--session", session_id,
+        )
+        state = self._result_value(result)
+        language = self._buyer_locales.get(session_id, "en-US").split("-")[0]
+        verified = bool(
+            isinstance(state, dict)
+            and str(state.get("navigatorLanguage") or "").casefold().split("-")[0] == language
+            and str(state.get("documentLanguage") or "").casefold().split("-")[0] == language
+        )
+        self._locale_verified[session_id] = verified
+        return verified
 
     async def _composer_available(self, session_id: str, selector: str) -> bool:
         expression = f"Boolean(document.querySelector({json.dumps(selector)}))"
@@ -1405,6 +1483,8 @@ class BrowserSkillAdapter(ProbeAdapter):
         )
 
     async def health(self, platform: str) -> AdapterHealth:
+        if platform == "chatgpt" and isinstance(self.client, BskCliClient) and not self.client.browser_instance_id:
+            return AdapterHealth(False, "ChatGPT sampling suspended: configure a dedicated LOOK4GEO_CHATGPT_BROWSER_ID distinct from LOOK4GEO_BROWSER_ID")
         return AdapterHealth(platform in PLATFORMS, "configured" if platform in PLATFORMS else "unsupported")
 
     async def login(self, platform: str) -> dict:
@@ -1429,6 +1509,7 @@ class BrowserSkillAdapter(ProbeAdapter):
                 diagnostic=f"unsupported platform: {platform}",
             )
         session_id: str | None = None
+        locale_verified: bool | None = None
         normalized = normalize_for_browser(request.prompt)
         try:
             total_timeout = float(
@@ -1453,6 +1534,9 @@ class BrowserSkillAdapter(ProbeAdapter):
                     )
                     break
                 session_id = await self.client.start(platform)
+                locale_verified = None
+                if isinstance(self.client, BskCliClient) and platform == "chatgpt":
+                    self.client._buyer_locales[session_id] = request.buyer_baseline.locale
                 try:
                     output = await self.client.probe(
                         session_id,
@@ -1466,6 +1550,9 @@ class BrowserSkillAdapter(ProbeAdapter):
                         diagnostic="timeout",
                     )
                 finally:
+                    if isinstance(self.client, BskCliClient):
+                        locale_verified = self.client._locale_verified.pop(session_id, None)
+                        self.client._buyer_locales.pop(session_id, None)
                     try:
                         await self.client.stop(session_id)
                     except Exception:
@@ -1489,6 +1576,7 @@ class BrowserSkillAdapter(ProbeAdapter):
                 )
             if output.failure is not None:
                 return PlatformAttempt(
+                    locale_verified=locale_verified,
                     platform=platform,
                     adapter=self.name,
                     status=JobStatus.FAILED,
@@ -1499,6 +1587,7 @@ class BrowserSkillAdapter(ProbeAdapter):
                     query_normalized=normalized.changed,
                 )
             return PlatformAttempt(
+                locale_verified=locale_verified,
                 platform=platform,
                 adapter=self.name,
                 status=JobStatus.SUCCEEDED,
@@ -1527,7 +1616,7 @@ class BrowserSkillAdapter(ProbeAdapter):
             diagnostic = str(error)
             failure = FailureKind.UNKNOWN
             if (
-                platform == "gemini"
+                platform in {"gemini", "chatgpt"}
                 and "submission state did not change" in diagnostic.casefold()
             ):
                 failure = FailureKind.SEND_FAILED

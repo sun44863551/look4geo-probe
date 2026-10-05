@@ -5,6 +5,8 @@ description: Use when measuring GEO visibility or comparing answers, citations, 
 
 # Look4GEO Probe
 
+买家语言基线：日本买家传 `--buyer-baseline japan`，韩国买家传 `korea`；没有明确要求则默认 `english`，不要仅凭问题语种推断。MCP 使用 `buyer_baseline`。保留原问题，每条批量请求均传参数，检查点区分基线。当前仅 ChatGPT BrowserSkill 校验语言；仅 `locale_verified=true` 为已验证，null 不得当作成功基线。语言不代表地理位置。
+
 Use this repository's private local CLI for real-product GEO measurements:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local`
@@ -28,6 +30,10 @@ The optional local `look4geo-probe` MCP tools expose the same service and result
 Active platform IDs are `doubao`, `deepseek`, `yuanbao`, `baidu`, `chatgpt`,
 `gemini`, `perplexity`, and `grok`. Baidu uses the same unified CLI/MCP tool;
 there is no separate Baidu tool. Qwen is not an active platform.
+
+ChatGPT requires `LOOK4GEO_CHATGPT_BROWSER_ID` from its dedicated sampling Chrome
+profile, distinct from `LOOK4GEO_BROWSER_ID`. If unavailable, suspend ChatGPT;
+never select the daily/shared browser. See `docs/chatgpt-account-isolation.md`.
 
 Gemini remains part of this same tool. Its preferred local adapter is
 `camoufox_gemini`; BrowserSkill and AI-Search-Hub remain fallbacks. Before the

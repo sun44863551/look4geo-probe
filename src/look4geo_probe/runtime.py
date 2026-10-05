@@ -21,12 +21,19 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         artifact_root=root / "data/runs",
     )
     del runtime  # Both callers intentionally use one machine-local adapter policy.
+    chatgpt_browser_id = os.environ.get("LOOK4GEO_CHATGPT_BROWSER_ID", "").strip()
+    if chatgpt_browser_id == browser.client.browser_instance_id:
+        chatgpt_browser_id = ""
+    chatgpt_browser = BrowserSkillAdapter(
+        client=BskCliClient(chatgpt_browser_id, allow_unconfigured=True),
+        artifact_root=root / "data/runs",
+    )
     chains = {
         "doubao": [browser, ai_hub],
         "deepseek": [browser],
         "yuanbao": [browser, ai_hub],
         "baidu": [browser],
-        "chatgpt": [browser],
+        "chatgpt": [chatgpt_browser],
         # AI-Search-Hub removes a large Chrome profile after each turn. That
         # cleanup is intentionally blocked by WorkBuddy's safe-delete guard,
         # so it cannot serve as a reliable Gemini fallback on this machine.
@@ -61,6 +68,10 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         # on this machine. Keep Camoufox as a Web-only fallback for transient
         # Chrome/session failures without forcing every sample through it.
         chains["gemini"].append(camoufox)
+    if os.environ.get("LOOK4GEO_GEMINI_CAMOUFOX_ONLY") == "1":
+        if len(chains["gemini"]) < 2:
+            raise ValueError("Gemini Camoufox-only mode requires LOOK4GEO_CAMOUFOX_ENABLED=1")
+        chains["gemini"] = [camoufox]
     return {
         platform: AdapterChain(platform, adapters)
         for platform, adapters in chains.items()

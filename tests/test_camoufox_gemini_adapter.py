@@ -143,6 +143,8 @@ class FakeLocator:
         return self
 
     async def count(self):
+        if 'Google Account:' in self.selector:
+            return 1 if self.page.signed_in else 0
         if "Open mode picker" in self.selector:
             self.page.mode_picker_checks += 1
             if (
@@ -260,8 +262,10 @@ class FakePage:
         response_bodies=(),
         mode="Flash",
         mode_picker_after_checks=None,
+        signed_in=True,
     ):
         self.body = body
+        self.signed_in = signed_in
         self.has_composer = has_composer
         self.transition = transition
         self.transition_at = transition_at
@@ -339,6 +343,26 @@ async def test_page_driver_login_rejects_anonymous_gemini_composer():
     ).login()
 
     assert result["status"] == "user_action_required"
+
+
+@pytest.mark.asyncio
+async def test_page_driver_login_requires_account_marker_even_with_composer():
+    page = FakePage(has_composer=True, signed_in=False)
+
+    result = await GeminiPageDriver(
+        page, poll_interval=0.001, login_timeout=0.01
+    ).login()
+
+    assert result["status"] == "user_action_required"
+
+
+@pytest.mark.asyncio
+async def test_current_versioned_flash_is_accepted_without_opening_mode_menu():
+    page = FakePage(mode="3.6 Flash")
+
+    assert await GeminiPageDriver(page)._ensure_flash_mode() is True
+    assert page.mode_picker_open is False
+    assert page.mode == "3.6 Flash"
 
 
 @pytest.mark.asyncio
