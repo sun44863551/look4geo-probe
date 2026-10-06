@@ -3,11 +3,16 @@ set -eu
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 LOCAL_ENV="$PROJECT_DIR/config/local.env"
+REQUESTED_BROWSER_ID=${LOOK4GEO_BROWSER_ID-}
 
 if [ -f "$LOCAL_ENV" ]; then
     set -a
     . "$LOCAL_ENV"
     set +a
+fi
+
+if [ -n "$REQUESTED_BROWSER_ID" ]; then
+    export LOOK4GEO_BROWSER_ID="$REQUESTED_BROWSER_ID"
 fi
 
 exec "$PROJECT_DIR/.venv/bin/probe" "$@"

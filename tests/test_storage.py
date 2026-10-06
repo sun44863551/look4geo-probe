@@ -43,6 +43,10 @@ def test_recover_orphaned_running_job_preserves_artifacts(tmp_path):
     assert restored.status == JobStatus.FAILED
     assert "interrupted" in (restored.diagnostic or "")
     assert marker.read_text(encoding="utf-8") == "evidence"
+    result = store.get_result(job.job_id)
+    assert result.status == JobStatus.FAILED
+    assert result.prompt == "recover me"
+    assert "interrupted" in (result.diagnostic or "")
 
 
 def test_request_round_trip_preserves_mode_and_platforms(tmp_path):

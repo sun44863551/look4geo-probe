@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,12 @@ def test_browser_skill_defines_every_probe_platform():
         "perplexity",
         "grok",
     }
+
+
+def test_chatgpt_answer_selector_targets_current_assistant_markdown():
+    assert PLATFORMS["chatgpt"]["answer_selector"] == (
+        '[data-message-author-role="assistant"] .markdown'
+    )
 
 
 def test_perplexity_selects_longest_answer_not_follow_up():
@@ -146,12 +154,21 @@ def test_textbox_lookup_accepts_current_chatgpt_label():
     ) == "@e17"
 
 
+def test_textbox_lookup_accepts_logged_in_yuanbao_english_label():
+    page = '@e13 textbox "Ask me anything. Use Shift+Enter for a new line." [empty]'
+    assert BskCliClient._find_textbox_ref(
+        page, PLATFORMS["yuanbao"]["textbox"]
+    ) == "@e13"
+
+
 def test_baidu_uses_current_official_entry_and_stable_dom_boundaries():
     config = PLATFORMS["baidu"]
 
     assert config["url"] == "https://chat.baidu.com/"
     assert config["composer_selector"] == "textarea.ci-textarea"
-    assert config["answer_selector"] == ".chat-search-answer-generate"
+    assert config["answer_selector"] == (
+        ".ai-entry-block.ai-markdown, .chat-search-answer-generate"
+    )
     assert config["conversation_marker"] == "/search/"
 
 
@@ -504,16 +521,15 @@ class GeminiVisibleConversationClient(GeminiSubmitClient):
 
 
 class LoginOverlayClient(BskCliClient):
-    def __init__(self):
+    def __init__(self, overlay_text='StaticText "微信登录"\nStaticText "请使用微信扫描二维码登录"'):
         super().__init__("browser", poll_interval=0)
+        self.overlay_text = overlay_text
 
     async def _run_json(self, *args, timeout=30.0):
         if args[0] == "navigate":
             return {"final_url": "https://yuanbao.tencent.com/chat/naQivTmsDa"}
         if args[0] == "observe":
-            return {
-                "text": 'StaticText "微信登录"\nStaticText "请使用微信扫描二维码登录"'
-            }
+            return {"text": self.overlay_text}
         if args[0] == "evaluate":
             return {"value": True}
         return {"ok": True}
@@ -670,6 +686,55 @@ async def test_login_overlay_wins_over_hidden_composer():
 
 
 @pytest.mark.asyncio
+async def test_yuanbao_english_login_overlay_is_not_reported_as_missing_textbox():
+    client = LoginOverlayClient(
+        'StaticText "Log In with WeChat"\nStaticText "Please scan the QR code"'
+    )
+
+    output = await client.probe("session", "yuanbao", "hello", timeout=1)
+
+    assert output.login_required is True
+    assert output.failure is None
+
+
+@pytest.mark.asyncio
+async def test_yuanbao_english_login_overlay_after_submission_stops_polling():
+    class PostSubmitLoginClient(BskCliClient):
+        def __init__(self):
+            super().__init__("browser", poll_interval=0)
+            self.answer_reads = 0
+
+        async def _run_json(self, *args, timeout=30.0):
+            if args[0] == "navigate":
+                return {"final_url": "https://yuanbao.tencent.com/chat/naQivTmsDa"}
+            if args[0] == "observe":
+                return {"text": '@e13 textbox "Ask me anything. Use Shift+Enter for a new line." [empty]'}
+            return {"value": True}
+
+        async def _answer_page(self, session_id, selector):
+            self.answer_reads += 1
+            if self.answer_reads == 1:
+                return {"answers": [], "page_text": "Ask me anything"}
+            return {"answers": [], "page_text": "Log In with WeChat\nPlease scan the QR code"}
+
+        async def _enter_prompt(self, *args, **kwargs):
+            return None
+
+        async def _wait_submission_ready(self, *args, **kwargs):
+            return True
+
+        async def _submit_prompt(self, *args, **kwargs):
+            return None
+
+    client = PostSubmitLoginClient()
+
+    output = await client.probe("session", "yuanbao", "hello", timeout=0.1)
+
+    assert output.login_required is True
+    assert client.answer_reads == 2
+
+
+@pytest.mark.asyncio
 async def test_doubao_dismisses_download_promotion_before_observing():
     client = FillFallbackClient()
 
@@ -716,24 +781,198 @@ def test_doubao_answer_boundary_targets_message_content():
 
 
 @pytest.mark.asyncio
+async def test_doubao_prompt_entry_verifies_native_editor_value():
+    class EditorClient(BskCliClient):
+        def __init__(self):
+            super().__init__("browser")
+            self.calls = []
+
+        async def _run_json(self, *args, timeout=30):
+            self.calls.append(args)
+            return {"value": "GEO 核验问题"}
+
+    client = EditorClient()
+    await client._enter_prompt("session", "doubao", "@e-old", "GEO 核验问题")
+    assert client.calls[0][0] == "evaluate"
+    assert "selectNodeContents(target)" in client.calls[0][1]
+    assert "@e-old" not in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_doubao_submission_uses_fresh_send_reference():
+    class SendClient(BskCliClient):
+        def __init__(self):
+            super().__init__("browser")
+            self.calls = []
+
+        async def _run_json(self, *args, timeout=30):
+            self.calls.append(args)
+            return {"text": '@e55 button "Chat input send"'}
+
+    client = SendClient()
+    await client._submit_prompt("session", "doubao", "@e-stale")
+    assert client.calls[-1][:2] == ("click", "@e55")
+
+
+@pytest.mark.asyncio
+async def test_doubao_picture_challenge_stops_without_retry_or_timeout():
+    class ChallengeClient(DelayedAnswerClient):
+        def __init__(self):
+            super().__init__([{"answers": [], "links": []}])
+            self.observations = 0
+
+        async def _run_json(self, *args, timeout=30):
+            if args[0] == "observe":
+                self.observations += 1
+                if self.observations > 1:
+                    return {"text": "请选择所有符合上文描述的图片，并拖拽到下方"}
+            return await super()._run_json(*args, timeout=timeout)
+
+    client = ChallengeClient()
+    output = await client.probe("session", "doubao", "GEO 核验问题", timeout=1)
+    assert output.login_required
+    assert "picture verification" in output.diagnostic
+    assert client.submit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_doubao_reference_count_must_match_collected_cards():
+    cards = [
+        {"url": f"https://evidence.example/article-{index}", "title": f"Article {index}"}
+        for index in range(1, 6)
+    ]
+    panel_page = {"panel_found": True, "expected_count": 12, "cards": cards}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True, "expected_count": 12}],
+        [panel_page, panel_page],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "doubao", []
+    )
+
+    assert len(sources) == 5
+    assert status == SourceCaptureStatus.FAILED
+    assert "12 references; collected 5 valid cards and 5 distinct URLs" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_doubao_twelve_references_are_recorded_when_all_are_visible():
+    cards = [
+        {"url": f"https://evidence.example/article-{index}", "title": f"Article {index}"}
+        for index in range(1, 13)
+    ]
+    panel_page = {"panel_found": True, "expected_count": 12, "cards": cards}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True, "expected_count": 12}],
+        [panel_page, panel_page],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "doubao", []
+    )
+
+    assert len(sources) == 12
+    assert status == SourceCaptureStatus.CAPTURED
+    assert "12/12" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_duplicate_reference_urls_count_as_inspected_cards_but_store_unique_sources():
+    cards = [
+        {"url": f"https://evidence.example/article-{index % 11}", "title": f"Article {index}"}
+        for index in range(12)
+    ]
+    panel_page = {"panel_found": True, "expected_count": 12, "cards": cards}
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True, "expected_count": 12}],
+        [panel_page, panel_page],
+    )
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "doubao", []
+    )
+
+    assert len(sources) == 11
+    assert status == SourceCaptureStatus.CAPTURED
+    assert "inspected 12/12" in diagnostic
+    assert "stored 11 unique sources" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_advertised_references_without_trigger_are_capture_failure():
+    client = SourceCollectorClient(
+        [{"found": False, "opened": False, "expected_count": 12}]
+    )
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "doubao", []
+    )
+
+    assert sources == []
+    assert status == SourceCaptureStatus.FAILED
+    assert "12 references" in diagnostic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", list(PLATFORMS))
+async def test_source_javascript_is_syntactically_valid(platform):
+    if not shutil.which("node"):
+        pytest.skip("Node.js not installed")
+
+    class ExpressionClient(BskCliClient):
+        def __init__(self):
+            super().__init__("browser")
+            self.expressions = []
+
+        async def _run_json(self, *args, timeout=30):
+            self.expressions.append(args[1])
+            return {"value": {"found": False, "opened": False}}
+
+    client = ExpressionClient()
+    await client._open_source_panel("session", platform)
+    await client._source_panel_page("session", platform)
+    for expression in client.expressions:
+        result = subprocess.run(
+            ["node", "-e", "new Function(process.argv[1])", expression],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_browser_health_rejects_other_connected_profile():
+    class HealthClient(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            return [{"instance_id": "daily-profile", "unresponsive": False}]
+
+    client = HealthClient("dedicated-profile")
+    state = await client.browser_health()
+    assert not state.ok
+    assert "dedicated-profile" in state.detail
+
+
+@pytest.mark.asyncio
 async def test_doubao_source_trigger_stays_inside_latest_answer():
     client = FillFallbackClient()
 
     await client._open_source_panel("session", "doubao")
 
     expression = client.calls[-1][1]
-    assert "const allowDocumentFallback = false" in expression
+    assert "closest('[data-testid=message_content]')" in expression
+    assert "[data-plugin-identifier*=search_query_result_block]" in expression
+    assert "document.querySelectorAll('a[href]')" not in expression
 
 
 @pytest.mark.asyncio
-async def test_source_panel_reader_filters_hidden_and_unlabelled_panels():
+async def test_doubao_source_reader_uses_current_search_result_block():
     client = FillFallbackClient()
 
     await client._source_panel_page("session", "doubao")
 
     expression = client.calls[-1][1]
-    assert "panel.getClientRects().length" in expression
-    assert "panelLabels.some" in expression
+    assert "closest('[data-testid=message_content]')" in expression
+    assert "a[data-thinking-box-tool-call][href]" in expression
+    assert "document.querySelectorAll('a[href]')" not in expression
 
 
 def test_gemini_answer_boundary_excludes_prompt_and_navigation():
@@ -1500,6 +1739,13 @@ async def test_chatgpt_search_heading_is_not_returned_as_answer():
 )
 def test_doubao_search_preamble_is_incomplete(preamble):
     assert browser_skill.is_incomplete_preamble("doubao", preamble) is True
+
+
+def test_yuanbao_research_preamble_is_not_a_finished_answer():
+    assert browser_skill.is_incomplete_preamble(
+        "yuanbao",
+        "我先把这个问题拆成几块来查：GEO 效果的核心可核验指标、行业公认的评测基准/白皮书、可用的第三方监测工具，以及服务商数据造假的识别方法。",
+    ) is True
 
 
 @pytest.mark.asyncio

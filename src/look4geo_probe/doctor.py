@@ -26,12 +26,17 @@ def parse_camoufox_mode(value: str | None) -> str:
     )
 
 
+TIMEOUT_MESSAGE = "timeout after {seconds:g}s"
+PROMPTFOO_VERSION_TIMEOUT = 90
+
+
 def _command_version(
     name: str,
     args: list[str],
     *,
     executable: str | None = None,
     extra_env: dict[str, str] | None = None,
+    timeout: float = 10,
 ) -> tuple[bool, str]:
     executable = executable or shutil.which(name)
     if not executable or (os.path.sep in executable and not Path(executable).is_file()):
@@ -41,10 +46,12 @@ def _command_version(
             [executable, *args],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout,
             check=False,
             env={**os.environ, **(extra_env or {})},
         )
+    except subprocess.TimeoutExpired:
+        return False, TIMEOUT_MESSAGE.format(seconds=timeout)
     except OSError:
         return False, "missing"
     detail = (completed.stdout or completed.stderr).strip().splitlines()
@@ -127,8 +134,14 @@ def collect_checks(
         "PROMPTFOO_CONFIG_DIR": str(root / "data/promptfoo"),
         "PROMPTFOO_DISABLE_TELEMETRY": "1",
     }
+    # The Node-based promptfoo CLI spends ~20s just booting; the default 10s
+    # budget is too tight and used to crash the whole doctor run.
     promptfoo_ok, promptfoo_detail = _command_version(
-        "promptfoo", ["--version"], executable=str(promptfoo), extra_env=promptfoo_env
+        "promptfoo",
+        ["--version"],
+        executable=str(promptfoo),
+        extra_env=promptfoo_env,
+        timeout=PROMPTFOO_VERSION_TIMEOUT,
     )
     checks.extend(
         [

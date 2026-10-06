@@ -59,7 +59,12 @@ class AdapterChain(ProbeAdapter):
         available = [
             adapter.name for adapter, state in zip(self.adapters, states, strict=True) if state.ok
         ]
-        detail = "available: " + ", ".join(available) if available else "no healthy adapter"
+        detail = "available: " + ", ".join(available) if available else (
+            "no healthy adapter: " + "; ".join(
+                f"{adapter.name}: {state.detail}"
+                for adapter, state in zip(self.adapters, states, strict=True)
+            )
+        )
         return AdapterHealth(bool(available), detail)
 
     async def run(self, platform: str, request: ProbeRequest) -> PlatformAttempt:

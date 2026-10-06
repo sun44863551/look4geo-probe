@@ -71,6 +71,20 @@ def test_doctor_marks_promptfoo_unhealthy_when_cli_cannot_start(tmp_path):
     assert checks["promptfoo"]["detail"] == "cannot-start"
 
 
+def test_doctor_survives_a_hanging_promptfoo_instead_of_crashing(tmp_path, monkeypatch):
+    """A slow CLI must degrade to a readable failure, not a TimeoutExpired crash."""
+    promptfoo = tmp_path / "tools/promptfoo/node_modules/.bin/promptfoo"
+    promptfoo.parent.mkdir(parents=True)
+    promptfoo.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    promptfoo.chmod(0o755)
+    monkeypatch.setattr("look4geo_probe.doctor.PROMPTFOO_VERSION_TIMEOUT", 1)
+
+    checks = {check["name"]: check for check in collect_checks(project_root=tmp_path)}
+
+    assert checks["promptfoo"]["ok"] is False
+    assert checks["promptfoo"]["detail"] == "timeout after 1s"
+
+
 def test_doctor_runs_promptfoo_with_project_local_config_dir(tmp_path):
     promptfoo = tmp_path / "tools/promptfoo/node_modules/.bin/promptfoo"
     promptfoo.parent.mkdir(parents=True)

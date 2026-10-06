@@ -33,7 +33,7 @@ PLATFORMS = {
             "发消息...",
             "发消息或按住空格说话...",
         ),
-        "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"]',
+        "composer_selector": '[data-testid="chat_input_input"] .tiptap[contenteditable="true"]',
         "login_markers": ("登录", "扫码登录"),
         "blocking_login_markers": (
             "登录以解锁更多功能",
@@ -49,7 +49,7 @@ PLATFORMS = {
         "composer_selector": 'div[contenteditable="true"]',
         "login_markers": ("登录", "注册"),
         "conversation_marker": "/c/",
-        "answer_selector": '[class*="MarkdownRoot-"]',
+        "answer_selector": '[data-message-author-role="assistant"] .markdown',
     },
     "deepseek": {
         "url": "https://chat.deepseek.com/",
@@ -61,10 +61,20 @@ PLATFORMS = {
     },
     "yuanbao": {
         "url": "https://yuanbao.tencent.com/chat",
-        "textbox": ("输入消息", "有问题尽管问我", "给元宝发送消息"),
+        "textbox": (
+            "输入消息",
+            "有问题尽管问我",
+            "给元宝发送消息",
+            "Ask me anything. Use Shift+Enter for a new line.",
+        ),
         "composer_selector": 'textarea, div[role="textbox"], div[contenteditable="true"], div[data-slate-editor="true"]',
         "login_markers": ("登录", "微信扫码登录", "上次登录"),
-        "blocking_login_markers": ("微信登录", "请使用微信扫描二维码登录"),
+        "blocking_login_markers": (
+            "微信登录",
+            "请使用微信扫描二维码登录",
+            "Log In with WeChat",
+            "Please scan the QR code",
+        ),
         "conversation_marker": "/chat/",
         "answer_selector": '[data-role="assistant"], [class*="assistant"], [class*="markdown"], [class*="answer"]',
     },
@@ -74,7 +84,7 @@ PLATFORMS = {
         "composer_selector": "textarea.ci-textarea",
         "login_markers": ("请登录", "登录同步历史对话"),
         "conversation_marker": "/search/",
-        "answer_selector": ".chat-search-answer-generate",
+        "answer_selector": ".ai-entry-block.ai-markdown, .chat-search-answer-generate",
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
@@ -130,10 +140,11 @@ for _platform_config in PLATFORMS.values():
 PLATFORMS["doubao"].update(
     {
         "document_source_fallback": False,
-        "source_trigger_labels": ("来源", "参考资料", "网页"),
+        "source_trigger_labels": ("来源", "参考资料", "参考", "篇资料", "网页"),
         "source_trigger_selectors": ('[data-testid*="source"]',),
         "source_panel_selectors": ('[role="dialog"]',),
-        "source_panel_labels": ("来源", "参考资料"),
+        "source_panel_labels": ("来源", "参考资料", "篇资料"),
+        "inline_source_summary": True,
         "source_card_selectors": ("a[href]",),
         "excluded_source_domains": ("doubao.com",),
     }
@@ -148,9 +159,10 @@ PLATFORMS["deepseek"].update(
 )
 PLATFORMS["yuanbao"].update(
     {
-        "source_trigger_labels": ("源", "引用来源"),
+        "source_trigger_labels": ("Sources", "引用来源"),
+        "source_trigger_selectors": ('[data-toolbar-type="citation"]',),
         "source_panel_selectors": (".agent-dialogue-references",),
-        "source_panel_labels": ("引用来源",),
+        "source_panel_labels": ("Reference Source", "引用来源"),
         "source_card_selectors": (".agent-dialogue-references__item",),
         "source_url_attributes": ("data-url", "href"),
         "excluded_source_domains": ("yuanbao.tencent.com",),
@@ -188,7 +200,7 @@ PLATFORMS["gemini"].update(
 )
 PLATFORMS["perplexity"].update(
     {
-        "answer_sources_only": True,
+        "answer_sources_only": False,
         "source_trigger_labels": ("个来源", "来源", "Sources"),
         "source_panel_selectors": ('[class*="max-h-[300px]"]',),
         "source_panel_labels": ("来源", "Sources", "链接"),
@@ -274,6 +286,8 @@ HUMAN_VERIFICATION_MARKERS = (
     "请拖动下方滑块完成验证",
     "Our systems have detected unusual traffic from your computer network",
     "我们的系统检测到您的计算机网络中存在异常流量",
+    "请选择所有符合上文描述的图片",
+    "并拖拽到下方",
 )
 PREAMBLE_PATTERN = re.compile(
     r"^(?:我会|我先|我将|我来|I(?:['’]?ll| will)\b|Let me\b)", re.I
@@ -391,7 +405,7 @@ def page_requires_human_verification(page: dict) -> bool:
 
 def is_incomplete_preamble(platform: str, answer: str) -> bool:
     return (
-        platform in {"chatgpt", "doubao"}
+        platform in {"chatgpt", "doubao", "yuanbao"}
         and len(answer) < 300
         and bool(PREAMBLE_PATTERN.match(answer))
     )
@@ -449,6 +463,21 @@ class BskCliClient:
         self.browser_instance_id = browser_instance_id
         self.poll_interval = poll_interval
         self._session_tabs: dict[str, int] = {}
+
+    async def browser_health(self) -> AdapterHealth:
+        try:
+            browsers = await self._run_json("browsers", timeout=10)
+        except (RuntimeError, asyncio.TimeoutError) as error:
+            return AdapterHealth(False, str(error))
+        connected = isinstance(browsers, list) and any(
+            item.get("instance_id") == self.browser_instance_id
+            and not item.get("unresponsive")
+            for item in browsers
+        )
+        return AdapterHealth(
+            connected,
+            "connected" if connected else f"browser {self.browser_instance_id} is not connected; open its dedicated profile",
+        )
 
     def _args_with_pinned_tab(self, args: tuple[str, ...]) -> tuple[str, ...]:
         if "--tab-id" in args or "--session" not in args:
@@ -551,6 +580,13 @@ class BskCliClient:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
+            if platform == "doubao":
+                observation = await self._run_json("observe", "--session", session_id, timeout=30)
+                if page_requires_human_verification({"page_text": observation.get("text", "")}):
+                    return BrowserProbeOutput(
+                        login_required=True,
+                        diagnostic="Doubao requires manual picture verification in its browser profile",
+                    )
             if page_requires_human_verification(page):
                 return BrowserProbeOutput(
                     login_required=True,
@@ -655,7 +691,10 @@ class BskCliClient:
                 failure=FailureKind.EXTRACTION_FAILED,
                 diagnostic="new answer candidates never became valid and stable",
             )
-        raise asyncio.TimeoutError
+        return BrowserProbeOutput(
+            failure=FailureKind.TIMEOUT,
+            diagnostic=f"no new answer matched {config['answer_selector']} within {timeout:g}s",
+        )
 
     async def _enter_prompt(
         self,
@@ -666,6 +705,23 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "doubao":
+            selector = PLATFORMS[platform]["composer_selector"]
+            expression = (
+                "(() => { const nodes = [...document.querySelectorAll("
+                + json.dumps(selector)
+                + ")]; const target = nodes.find(n => n.getClientRects().length); "
+                "if (!target) return ''; target.focus(); "
+                "const range = document.createRange(); range.selectNodeContents(target); "
+                "const selection = window.getSelection(); selection.removeAllRanges(); "
+                "selection.addRange(range); document.execCommand('insertText', false, "
+                + json.dumps(prompt)
+                + "); return target.innerText || ''; })()"
+            )
+            result = await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
+            if str(self._result_value(result) or "").strip() != prompt.strip():
+                raise RuntimeError("Doubao prompt entry could not be verified")
+            return
         if platform == "gemini":
             selector = PLATFORMS[platform]["composer_selector"]
             target = ("--ref", textbox_ref) if textbox_ref else ("--selector", selector)
@@ -862,6 +918,16 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "doubao":
+            observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
+            send_ref = self._find_button_ref(str(observation.get("text", "")), ("Chat input send", "发送"))
+            if not send_ref:
+                raise RuntimeError("Doubao send button is unavailable after prompt entry")
+            await self._run_json(
+                "click", send_ref,
+                "--session", session_id, timeout=timeout,
+            )
+            return
         if platform == "gemini":
             state_expression = (
                 "(() => { const composers = [...document.querySelectorAll(" +
@@ -1098,6 +1164,11 @@ class BskCliClient:
             + json.dumps(selector)
             + ")]; const bodyText = document.body ? (document.body.innerText || '') : ''; "
             "const buttons = [...document.querySelectorAll('button')]; "
+            "const yuanbaoAnswers = [...document.querySelectorAll('.agent-chat__bubble--ai')]; "
+            "const latestYuanbaoAnswer = yuanbaoAnswers.at(-1); "
+            "const yuanbaoStillGenerating = location.hostname === 'yuanbao.tencent.com' && "
+            "Boolean(latestYuanbaoAnswer) && "
+            "!latestYuanbaoAnswer.querySelector('[aria-label=重新生成]'); "
             "return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
             "answer_entries:nodes.map(n => ({text:(n.innerText || '').trim(),links:"
             "[...n.querySelectorAll('a[href]')].map(a => ({url:a.href,title:"
@@ -1105,7 +1176,8 @@ class BskCliClient:
             "answer_links:nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => "
             "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
             "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
-            "generating:buttons.some(b => /停止生成|Stop generating|Stop responding/i.test("
+            "generating:yuanbaoStillGenerating || buttons.some(b => "
+            "/停止生成|Stop generating|Stop responding/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
             "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit|距离限制重置还剩|upgrade to supergrok/i.test(bodyText),"
             "page_text:bodyText}; })()"
@@ -1192,6 +1264,13 @@ class BskCliClient:
             return merge_sources(candidates), SourceCaptureStatus.FAILED, str(open_error)
         if not isinstance(open_state, dict) or not open_state.get("found"):
             sources = merge_sources(candidates)
+            expected_count = int(open_state.get("expected_count") or 0) if isinstance(open_state, dict) else 0
+            if expected_count:
+                return (
+                    sources,
+                    SourceCaptureStatus.FAILED,
+                    f"answer advertises {expected_count} references but the source trigger was not located",
+                )
             status = (
                 SourceCaptureStatus.CAPTURED
                 if sources
@@ -1207,8 +1286,12 @@ class BskCliClient:
 
         previous_cards: list[dict] | None = None
         stable_cards: list[dict] = []
+        panel_found = False
+        expected_count = int(open_state.get("expected_count") or 0)
         for _ in range(4):
             panel_page = await self._source_panel_page(session_id, platform)
+            panel_found = panel_found or bool(panel_page.get("panel_found"))
+            expected_count = max(expected_count, int(panel_page.get("expected_count") or 0))
             cards = list(panel_page.get("cards", [])) if isinstance(panel_page, dict) else []
             if previous_cards is not None and cards == previous_cards:
                 stable_cards = cards
@@ -1217,6 +1300,8 @@ class BskCliClient:
             stable_cards = cards
             await asyncio.sleep(self.poll_interval)
 
+        valid_cards = 0
+        panel_records: list[SourceRecord] = []
         for card in stable_cards:
             record = self._source_record(
                 card,
@@ -1226,13 +1311,24 @@ class BskCliClient:
             )
             if record is not None:
                 candidates.append(record)
+                panel_records.append(record)
+                valid_cards += 1
         sources = merge_sources(candidates)
+        unique_panel_cards = len(merge_sources(panel_records))
+        if not panel_found or (expected_count and valid_cards < expected_count):
+            return sources, SourceCaptureStatus.FAILED, (
+                f"source panel advertised {expected_count} references; collected {valid_cards} valid cards and {unique_panel_cards} distinct URLs"
+                if expected_count else "source trigger opened but no source panel could be located"
+            )
         status = (
             SourceCaptureStatus.CAPTURED
             if sources
             else SourceCaptureStatus.NONE_EXPOSED
         )
-        return sources, status, None
+        return sources, status, (
+            f"inspected {valid_cards}/{expected_count} advertised source cards; stored {len(sources)} unique sources"
+            if expected_count else None
+        )
 
     async def _collect_gemini_source_cards(self, session_id: str) -> list[dict]:
         observation = await self._run_json(
@@ -1241,7 +1337,7 @@ class BskCliClient:
         source_refs = [
             ref
             for ref, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
-            if "View source details" in label
+            if any(text in label for text in ("View source details", "查看引用来源详情", "查看来源"))
         ]
         cards: list[dict] = []
         for index, source_ref in enumerate(source_refs):
@@ -1257,7 +1353,10 @@ class BskCliClient:
                 await asyncio.sleep(self.poll_interval)
             if not panel_page.get("panel_found"):
                 raise RuntimeError(f"Gemini source dialog {index + 1} did not open")
-            cards.extend(list(panel_page.get("cards", [])))
+            dialog_cards = list(panel_page.get("cards", []))
+            if not dialog_cards:
+                raise RuntimeError(f"Gemini source dialog {index + 1} opened but no source links were read")
+            cards.extend(dialog_cards)
             await self._run_json("press", "Escape", "--session", session_id, timeout=30)
         return cards
 
@@ -1285,6 +1384,65 @@ class BskCliClient:
         )
 
     async def _open_source_panel(self, session_id: str, platform: str) -> dict:
+        if platform == "baidu":
+            expression = (
+                "(() => { const root = [...document.querySelectorAll('.ai-entry')].at(-1); "
+                "if (!root) return {found:false,opened:false,expected_count:0}; "
+                "const heading = root.querySelector('.thinking-steps-title-extra')?.innerText || ''; "
+                r"const match = heading.match(/共参考\s*(\d+)\s*篇资料/); "
+                "const expected_count = match ? Number(match[1]) : 0; "
+                "const list = root.querySelector('ol[class*=_reference_]'); "
+                "if (list?.getClientRects().length) return {found:true,opened:true,expected_count}; "
+                "const trigger = root.querySelector('.thinking-steps-title-extra')?.closest('[class*=_main-header_]'); "
+                "if (!trigger) return {found:expected_count>0,opened:false,expected_count}; "
+                "try { trigger.click(); return {found:true,opened:true,expected_count}; } "
+                "catch (error) { return {found:true,opened:false,expected_count,diagnostic:String(error)}; } })()"
+            )
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"found": False, "opened": False}
+        if platform == "yuanbao":
+            expression = (
+                "(() => { const triggers = [...document.querySelectorAll('[data-toolbar-type=citation]')]"
+                ".filter(node => node.getClientRects().length); const trigger = triggers.at(-1); "
+                "if (!trigger) return {found:false,opened:false,expected_count:0}; "
+                "const label = trigger.getAttribute('aria-label') || ''; "
+                r"const match = label.match(/引用\s*(\d+)\s*篇资料/); "
+                "const expected_count = match ? Number(match[1]) : 0; "
+                "const panel = document.querySelector('#chatReferenceList.agent-dialogue-references'); "
+                "if (panel?.getClientRects().length) return {found:true,opened:true,expected_count}; "
+                "try { trigger.click(); return {found:true,opened:true,expected_count}; } "
+                "catch (error) { return {found:true,opened:false,expected_count,diagnostic:String(error)}; } })()"
+            )
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"found": False, "opened": False}
+        if platform == "doubao":
+            expression = (
+                "(() => { const answers = [...document.querySelectorAll("
+                "'[data-testid=message_text_content]')]; "
+                "const container = answers.at(-1)?.closest('[data-testid=message_content]'); "
+                "const blocks = [...(container?.querySelectorAll("
+                "'[data-plugin-identifier*=search_query_result_block]') || [])]; "
+                "if (!blocks.length) return {found:false,opened:false,expected_count:0}; "
+                "let expected_count = 0; let missing = 0; "
+                "for (const block of blocks) { const trigger = block.querySelector('[data-copy-ignore]'); "
+                r"const text = trigger?.innerText || ''; const match = text.match(/参考\s*(\d+)\s*篇资料/); "
+                "expected_count += match ? Number(match[1]) : 0; "
+                "if (block.querySelectorAll('a[data-thinking-box-tool-call][href]').length) continue; "
+                "if (!trigger) { missing++; continue; } trigger.click(); } "
+                "return {found:true,opened:missing===0,expected_count,"
+                "diagnostic:missing ? missing+' source blocks have no expand control' : null}; })()"
+            )
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"found": False, "opened": False}
         config = PLATFORMS[platform]
         expression = (
             "(() => { const selectors = "
@@ -1296,17 +1454,24 @@ class BskCliClient:
             + "; const allowDocumentFallback = "
             + json.dumps(bool(config.get("document_source_fallback", True)))
             + "; const answers = [...document.querySelectorAll(answerSelector)]; "
-            "const root = answers.at(-1) || document; let trigger = null; "
-            "for (const selector of selectors) { trigger = root.querySelector(selector) || "
+            "const root = answers.at(-1) || document; "
+            + self._source_scope_js()
+            + "let trigger = null; "
+            "for (const selector of selectors) { trigger = roots.flatMap(r => [...r.querySelectorAll(selector)])"
+            ".find(n => n.getClientRects().length) || "
             "(allowDocumentFallback ? document.querySelector(selector) : null); if (trigger) break; } "
-            "if (!trigger && labels.length) { const controls = [...root.querySelectorAll("
-            "'button,[role=button],a,[onclick]'), ...(allowDocumentFallback ? document.querySelectorAll("
+            "if (!trigger && labels.length) { const controls = [...new Set(roots.flatMap(r => [...r.querySelectorAll("
+            "'button,[role=button],a,[onclick],summary,div,span')])), "
+            "...(allowDocumentFallback ? document.querySelectorAll("
             "'button,[role=button],a,[onclick]') : [])]; trigger = controls.find(node => { const text = "
             "((node.getAttribute('aria-label') || '') + ' ' + (node.innerText || '')).trim(); "
-            "return labels.some(label => text.includes(label)); }); } "
-            "if (!trigger) return {found:false,opened:false}; "
-            "try { trigger.click(); return {found:true,opened:true}; } "
-            "catch (error) { return {found:true,opened:false,diagnostic:String(error)}; } })()"
+            "return node.getClientRects().length && text.length < 240 && labels.some(label => text.includes(label)); }); } "
+            "const expected_count = Math.max(0,...roots.map(r => sourceCount(r.innerText || ''))); "
+            "if (!trigger) return {found:expected_count > 0,opened:false,expected_count,"
+            "diagnostic:expected_count ? 'reference count is visible but source trigger was not located' : null}; "
+            "try { if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click(); "
+            "return {found:true,opened:true,expected_count}; } "
+            "catch (error) { return {found:true,opened:false,expected_count,diagnostic:String(error)}; } })()"
         )
         result = await self._run_json(
             "evaluate", expression, "--session", session_id, timeout=30
@@ -1314,7 +1479,79 @@ class BskCliClient:
         value = self._result_value(result)
         return value if isinstance(value, dict) else {"found": False, "opened": False}
 
+    @staticmethod
+    def _source_scope_js() -> str:
+        """Include sibling reference blocks, stopping before earlier answer turns."""
+        pattern = r"参考\s*(\d+)\s*篇资料|(\d+)\s*(?:sources|个来源|个网页)|(?:来源|引用来源)\s*[（(]?\s*(\d+)"
+        return (
+            "const roots = []; let scope = root; "
+            "for (let depth = 0; scope && scope !== document.body && depth < 6; depth++,scope = scope.parentElement) { "
+            "if (scope !== root && scope.querySelectorAll(answerSelector).length > 1) break; roots.push(scope); } "
+            "if (!roots.length) roots.push(root); "
+            "const countPattern = new RegExp(" + json.dumps(pattern) + ", 'i'); "
+            "const sourceCount = text => { const m = text.match(countPattern); "
+            "return m ? Number(m.slice(1).find(Boolean)) : 0; }; "
+        )
+
     async def _source_panel_page(self, session_id: str, platform: str) -> dict:
+        if platform == "baidu":
+            expression = (
+                "(() => { const root = [...document.querySelectorAll('.ai-entry')].at(-1); "
+                "const heading = root?.querySelector('.thinking-steps-title-extra')?.innerText || ''; "
+                r"const match = heading.match(/共参考\s*(\d+)\s*篇资料/); "
+                "const expected_count = match ? Number(match[1]) : 0; "
+                "const list = root?.querySelector('ol[class*=_reference_]'); "
+                "if (!list?.getClientRects().length) return {panel_found:false,expected_count,cards:[]}; "
+                "const cards = [...list.querySelectorAll('li[data-long-press-ext-info]')].map(item => { "
+                "let info = {}; try { info = JSON.parse(item.getAttribute('data-long-press-ext-info') || '{}'); } "
+                "catch {} return {url:info.link || '',title:info.linkTitle || item.innerText.trim(),snippet:null}; }); "
+                "return {panel_found:true,expected_count,cards}; })()"
+            )
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"panel_found": False, "cards": []}
+        if platform == "yuanbao":
+            expression = (
+                "(() => { const panel = document.querySelector('#chatReferenceList.agent-dialogue-references'); "
+                "if (!panel?.getClientRects().length) return {panel_found:false,expected_count:0,cards:[]}; "
+                "const heading = panel.querySelector('.agent-dialogue-references__header-txt')?.innerText || ''; "
+                r"const match = heading.match(/[（(]\s*(\d+)\s*[）)]/); "
+                "const expected_count = match ? Number(match[1]) : 0; "
+                "const cards = [...panel.querySelectorAll('.agent-dialogue-references__list > .agent-dialogue-references__item')]"
+                ".map(item => { const link = item.querySelector('[data-url]'); "
+                "return {url:link?.getAttribute('data-url') || '', "
+                "title:(item.querySelector('h4')?.innerText || '').trim() || null, "
+                "snippet:(item.innerText || '').trim() || null}; }); "
+                "return {panel_found:true,expected_count,cards}; })()"
+            )
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"panel_found": False, "cards": []}
+        if platform == "doubao":
+            expression = (
+                "(() => { const answers = [...document.querySelectorAll("
+                "'[data-testid=message_text_content]')]; "
+                "const container = answers.at(-1)?.closest('[data-testid=message_content]'); "
+                "const blocks = [...(container?.querySelectorAll("
+                "'[data-plugin-identifier*=search_query_result_block]') || [])]; "
+                "let expected_count = 0; const cards = []; "
+                "for (const block of blocks) { const text = block.querySelector('[data-copy-ignore]')?.innerText || ''; "
+                r"const match = text.match(/参考\s*(\d+)\s*篇资料/); "
+                "expected_count += match ? Number(match[1]) : 0; "
+                "for (const anchor of block.querySelectorAll('a[data-thinking-box-tool-call][href]')) { "
+                "cards.push({url:anchor.href,title:(anchor.innerText || '').trim() || null,"
+                "snippet:null}); } } "
+                "return {panel_found:blocks.length>0,expected_count,cards}; })()"
+            )
+            result = await self._run_json(
+                "evaluate", expression, "--session", session_id, timeout=30
+            )
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"panel_found": False, "cards": []}
         config = PLATFORMS[platform]
         expression = (
             "(() => { const panelSelectors = "
@@ -1325,18 +1562,31 @@ class BskCliClient:
             + json.dumps(list(config["source_card_selectors"]))
             + "; const urlAttributes = "
             + json.dumps(list(config["source_url_attributes"]))
+            + "; const answerSelector = "
+            + json.dumps(config["answer_selector"])
+            + "; const answers = [...document.querySelectorAll(answerSelector)]; "
+            "const root = answers.at(-1) || document; "
+            + self._source_scope_js()
+            + "const inlineSummary = "
+            + json.dumps(bool(config.get("inline_source_summary")))
             + "; let panels = panelSelectors.flatMap(selector => "
             "[...document.querySelectorAll(selector)]); if (!panels.length && panelLabels.length) { "
-            "const labelled = [...document.querySelectorAll('h1,h2,h3,h4,[role=heading]')].filter("
-            "node => panelLabels.some(label => (node.innerText || '').includes(label))); "
+            "const labelled = [...new Set(roots.flatMap(r => [...r.querySelectorAll("
+            "'h1,h2,h3,h4,[role=heading],summary,button,div,span')]))].filter("
+            "node => (node.innerText || '').length < 240 && panelLabels.some(label => (node.innerText || '').includes(label))); "
             "for (const heading of labelled) { let node = heading; for (let depth = 0; node && depth < 6; "
-            "depth += 1, node = node.parentElement) { if (cardSelectors.some(selector => "
+            "depth += 1, node = node.parentElement) { if (!roots.some(r => r === node || r.contains(node))) break; "
+            "if (cardSelectors.some(selector => "
             "node.querySelector(selector))) { panels.push(node); break; } } } } "
+            "if (!panels.length && inlineSummary) { const inline = roots.find(r => "
+            "sourceCount(r.innerText || '') > 0 && r.querySelector('a[href]')); if (inline) panels.push(inline); } "
             "panels = panels.filter(panel => panel.getClientRects().length && "
             "(!panelLabels.length || panelLabels.some(label => (panel.innerText || '').includes(label)))); "
-            "if (!panels.length) return {panel_found:false,cards:[]}; const cards = panels.flatMap(panel => "
-            "cardSelectors.flatMap(selector => [...panel.querySelectorAll(selector)])); "
-            "return {panel_found:true,cards:cards.map(card => { const anchor = "
+            "const expected_count = Math.max(0,...roots.map(r => sourceCount(r.innerText || ''))); "
+            "if (!panels.length) return {panel_found:false,cards:[],expected_count}; "
+            "const cards = [...new Set(panels.flatMap(panel => "
+            "cardSelectors.flatMap(selector => [...panel.querySelectorAll(selector)])))]; "
+            "return {panel_found:true,expected_count,cards:cards.map(card => { const anchor = "
             "card.matches('a[href]') ? card : card.querySelector('a[href]'); const urlNode = "
             "card.matches('[href],[data-url]') ? card : card.querySelector('[href],[data-url]'); "
             "const url = urlAttributes.map(attribute => attribute === 'href' ? urlNode?.href : "
@@ -1405,6 +1655,8 @@ class BrowserSkillAdapter(ProbeAdapter):
         )
 
     async def health(self, platform: str) -> AdapterHealth:
+        if platform in PLATFORMS and hasattr(self.client, "browser_health"):
+            return await self.client.browser_health()
         return AdapterHealth(platform in PLATFORMS, "configured" if platform in PLATFORMS else "unsupported")
 
     async def login(self, platform: str) -> dict:

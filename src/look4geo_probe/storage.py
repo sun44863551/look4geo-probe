@@ -111,9 +111,21 @@ class ProbeStore:
             ).fetchall()
         recovered = [row["job_id"] for row in rows]
         for job_id in recovered:
-            self.update_status(
-                job_id, JobStatus.FAILED, "interrupted: worker stopped before completion"
-            )
+            diagnostic = "interrupted: worker stopped before completion"
+            job = self.get_job(job_id)
+            try:
+                result = self.get_result(job_id).model_copy(
+                    update={"status": JobStatus.FAILED, "diagnostic": diagnostic}
+                )
+            except KeyError:
+                result = ProbeResult(
+                    job_id=job_id,
+                    prompt=job.request.prompt,
+                    status=JobStatus.FAILED,
+                    diagnostic=diagnostic,
+                )
+            self.save_result(result)
+            self.update_status(job_id, JobStatus.FAILED, diagnostic)
         return recovered
 
     def save_result(self, result: ProbeResult) -> None:

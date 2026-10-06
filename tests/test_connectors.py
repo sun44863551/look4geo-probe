@@ -66,15 +66,12 @@ def test_shared_runtime_uses_browser_primary_and_ai_hub_fallback(tmp_path, monke
 
     adapters = build_adapters(tmp_path, runtime="default")
 
-    assert adapters["doubao"].adapter_names == ["browser_skill", "ai_search_hub"]
-    assert adapters["gemini"].adapter_names == [
-        "browser_skill",
-        "camoufox_gemini",
-    ]
-    assert adapters["chatgpt"].adapter_names == ["browser_skill"]
+    assert adapters["doubao"].adapter_names == ["browser_skill"]
+    assert adapters["gemini"].adapter_names == ["camoufox_gemini"]
+    assert adapters["chatgpt"].adapter_names == ["unconfigured_chatgpt"]
     assert adapters["baidu"].adapter_names == ["browser_skill"]
     assert adapters["deepseek"].adapter_names == ["browser_skill"]
-    assert adapters["yuanbao"].adapter_names == ["browser_skill", "ai_search_hub"]
+    assert adapters["yuanbao"].adapter_names == ["browser_skill"]
     assert adapters["perplexity"].adapter_names == ["browser_skill"]
     assert adapters["grok"].adapter_names == ["browser_skill"]
     assert "qwen" not in adapters
@@ -86,7 +83,7 @@ def test_disabling_camoufox_restores_previous_gemini_chain(tmp_path, monkeypatch
 
     adapters = build_adapters(tmp_path, runtime="default")
 
-    assert adapters["gemini"].adapter_names == ["browser_skill"]
+    assert adapters["gemini"].adapter_names == ["unconfigured_gemini"]
 
 
 def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch):
@@ -101,11 +98,49 @@ def test_camoufox_content_sandbox_setting_reaches_runtime(tmp_path, monkeypatch)
         if adapter.name == "camoufox_gemini"
     )
 
-    assert adapters["gemini"].adapter_names == [
-        "browser_skill",
-        "camoufox_gemini",
-    ]
+    assert adapters["gemini"].adapter_names == ["camoufox_gemini"]
     assert camoufox.runtime.disable_content_sandbox is True
+
+
+def test_chatgpt_uses_only_dedicated_browser_instance(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "shared-browser")
+    monkeypatch.setenv("LOOK4GEO_CHATGPT_BROWSER_ID", "dedicated-browser")
+
+    adapters = build_adapters(tmp_path)
+
+    assert adapters["chatgpt"].adapter_names == ["browser_skill"]
+    assert adapters["chatgpt"].adapters[0].client.browser_instance_id == "dedicated-browser"
+    assert adapters["deepseek"].adapters[0].client.browser_instance_id == "shared-browser"
+
+
+def test_chatgpt_rejects_shared_browser_instance(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "shared-browser")
+    monkeypatch.setenv("LOOK4GEO_CHATGPT_BROWSER_ID", "shared-browser")
+
+    adapters = build_adapters(tmp_path)
+
+    assert adapters["chatgpt"].adapter_names == ["unconfigured_chatgpt"]
+
+
+def test_gemini_uses_only_dedicated_browser_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "shared-browser")
+    monkeypatch.setenv("LOOK4GEO_GEMINI_BROWSER_ID", "dedicated-browser")
+    monkeypatch.setenv("LOOK4GEO_CAMOUFOX_ENABLED", "1")
+
+    adapters = build_adapters(tmp_path)
+
+    assert adapters["gemini"].adapter_names == ["browser_skill"]
+    assert adapters["gemini"].adapters[0].client.browser_instance_id == "dedicated-browser"
+
+
+def test_gemini_rejects_shared_browser_instance(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_BROWSER_ID", "shared-browser")
+    monkeypatch.setenv("LOOK4GEO_GEMINI_BROWSER_ID", "shared-browser")
+    monkeypatch.setenv("LOOK4GEO_CAMOUFOX_ENABLED", "0")
+
+    adapters = build_adapters(tmp_path)
+
+    assert adapters["gemini"].adapter_names == ["unconfigured_gemini"]
 
 
 def test_local_connector_instructions_preserve_private_cli_contract():
