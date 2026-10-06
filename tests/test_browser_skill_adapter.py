@@ -105,6 +105,15 @@ def test_yuanbao_selects_full_answer_not_nested_source_url():
     ) == full_answer
 
 
+def test_yuanbao_attachment_filename_is_not_a_text_answer():
+    assert browser_skill.is_attachment_only_answer(
+        "yuanbao", "GEO服务商反刷量核\n验清单.xlsx"
+    ) is True
+    assert browser_skill.is_attachment_only_answer(
+        "yuanbao", "请下载附件；下面是具体分析。" + "核验方法。" * 20
+    ) is False
+
+
 def test_text_url_extraction_drops_markdown_list_separator_after_url():
     text = "来源：https://example.com/product/123-abc-\n1\n下一项"
 

@@ -412,6 +412,15 @@ def is_incomplete_preamble(platform: str, answer: str) -> bool:
     )
 
 
+def is_attachment_only_answer(platform: str, answer: str) -> bool:
+    """An exported file name is not a usable conversational answer."""
+    return (
+        platform == "yuanbao"
+        and len(answer.strip()) < 100
+        and bool(re.search(r"\.(?:xlsx?|csv|pdf|docx?|pptx?)\s*$", answer.strip(), re.I))
+    )
+
+
 def is_context_contamination(platform: str, prompt: str, answer: str) -> bool:
     return (
         platform == "chatgpt"
@@ -592,6 +601,7 @@ class BskCliClient:
         previous = ""
         stable_rounds = 0
         saw_answer_candidate = False
+        saw_attachment_only_answer = False
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
@@ -637,6 +647,11 @@ class BskCliClient:
                 continue
             if platform == "gemini":
                 current_text = collapse_overlapping_stream_prefix(current_text)
+            if is_attachment_only_answer(platform, current_text):
+                saw_attachment_only_answer = True
+                previous = current_text
+                stable_rounds = 0
+                continue
             if is_incomplete_preamble(platform, current_text) or is_context_contamination(
                 platform, prompt, current_text
             ):
@@ -704,7 +719,11 @@ class BskCliClient:
         if saw_answer_candidate:
             return BrowserProbeOutput(
                 failure=FailureKind.EXTRACTION_FAILED,
-                diagnostic="new answer candidates never became valid and stable",
+                diagnostic=(
+                    "platform returned only an attachment, not a text answer"
+                    if saw_attachment_only_answer
+                    else "new answer candidates never became valid and stable"
+                ),
             )
         return BrowserProbeOutput(
             failure=FailureKind.TIMEOUT,
