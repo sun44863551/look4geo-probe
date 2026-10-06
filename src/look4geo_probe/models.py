@@ -9,6 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SCHEMA_VERSION = 3
 
 
+class BuyerBaseline(StrEnum):
+    ENGLISH = "english"
+    JAPAN = "japan"
+    KOREA = "korea"
+
+    @property
+    def locale(self) -> str:
+        return {"english": "en-US", "japan": "ja-JP", "korea": "ko-KR"}[self.value]
+
+
 class RouteMode(StrEnum):
     AUTO = "auto"
     COMPARE = "compare"
@@ -66,6 +76,7 @@ class StrictModel(BaseModel):
 
 class ProbeRequest(StrictModel):
     prompt: str = Field(min_length=1)
+    buyer_baseline: BuyerBaseline = BuyerBaseline.ENGLISH
     mode: RouteMode = RouteMode.AUTO
     platforms: list[str] = Field(default_factory=list)
     options: dict[str, Any] = Field(default_factory=dict)
@@ -123,6 +134,9 @@ class SourceRecord(StrictModel):
 
 
 class PlatformAttempt(StrictModel):
+    buyer_baseline: BuyerBaseline | None = None
+    buyer_locale: str | None = None
+    locale_verified: bool | None = None
     platform: str
     adapter: str
     status: JobStatus
@@ -146,6 +160,8 @@ class PlatformAttempt(StrictModel):
 
 
 class ProbeResult(StrictModel):
+    buyer_baseline: BuyerBaseline | None = None
+    buyer_locale: str | None = None
     schema_version: int = SCHEMA_VERSION
     job_id: str
     prompt: str

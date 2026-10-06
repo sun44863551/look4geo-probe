@@ -36,6 +36,8 @@ class ProbeService:
             result = ProbeResult(
                 job_id=job.job_id,
                 prompt=request.prompt,
+                buyer_baseline=request.buyer_baseline,
+                buyer_locale=request.buyer_baseline.locale,
                 status=JobStatus.FAILED,
                 routing=routing,
                 diagnostic="no healthy platform selected",
@@ -71,6 +73,8 @@ class ProbeService:
                         attempt.model_copy(
                             update={
                                 "sample_index": sample_index,
+                                "buyer_baseline": request.buyer_baseline,
+                                "buyer_locale": request.buyer_baseline.locale,
                                 "started_at": started_at,
                                 "finished_at": attempt.finished_at or datetime.now(timezone.utc),
                             }
@@ -81,6 +85,8 @@ class ProbeService:
             result = ProbeResult(
                 job_id=job_id,
                 prompt=request.prompt,
+                buyer_baseline=request.buyer_baseline,
+                buyer_locale=request.buyer_baseline.locale,
                 status=JobStatus.FAILED,
                 routing=routing,
                 attempts=list(attempts),
@@ -102,6 +108,8 @@ class ProbeService:
         result = ProbeResult(
             job_id=job_id,
             prompt=request.prompt,
+            buyer_baseline=request.buyer_baseline,
+            buyer_locale=request.buyer_baseline.locale,
             status=status,
             routing=routing,
             attempts=list(attempts),

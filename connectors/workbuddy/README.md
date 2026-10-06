@@ -29,9 +29,10 @@ Active platform IDs are `doubao`, `deepseek`, `yuanbao`, `baidu`, `chatgpt`,
 local tool; Qwen is no longer an active platform.
 
 Gemini is also not a separate tool. When `LOOK4GEO_GEMINI_BROWSER_ID`
-is set to a dedicated BrowserSkill instance different from `LOOK4GEO_BROWSER_ID`,
-the unified probe uses only that browser for Gemini. Otherwise it uses
-`camoufox_gemini`, with no shared-Chrome fallback. Its persistent profile lives at
+is set to the probe BrowserSkill instance, that browser is the primary Gemini
+route and `camoufox_gemini` is an isolated fallback when enabled. The ID may
+equal `LOOK4GEO_BROWSER_ID` when the whole probe uses a separate Chrome profile;
+neither route uses the daily Chrome profile. The Camoufox profile lives at
 `data/camoufox/profiles/gemini`; this directory is machine-local, contains
 login state, and must not be uploaded. Start first-time login with
 `scripts/probe-local login gemini --json`, complete any Google challenge only
@@ -39,10 +40,10 @@ in the visible browser window, and continue using the normal `run` command.
 `login_required` means the sample was not collected; it must never be recorded
 as "not mentioned" or included in measurement denominators.
 
-ChatGPT uses a dedicated Chrome profile and requires
-`LOOK4GEO_CHATGPT_BROWSER_ID` to be set to that profile's BrowserSkill
-extension instance ID. It must differ from `LOOK4GEO_BROWSER_ID`. If unset,
-ChatGPT is unavailable rather than silently using the normal Chrome profile.
+ChatGPT requires `LOOK4GEO_CHATGPT_BROWSER_ID` to be set to the probe Chrome
+profile's BrowserSkill instance ID. It may equal `LOOK4GEO_BROWSER_ID` when
+that is the same isolated probe profile. If unset, ChatGPT is unavailable rather
+than silently using the daily Chrome profile.
 Install and connect BrowserSkill in the dedicated profile, sign in to the
 intended ChatGPT account there, then set the ID in private `config/local.env`.
 

@@ -60,6 +60,16 @@ class ResultAdapter(ProbeAdapter):
 
 
 @pytest.mark.asyncio
+async def test_gemini_login_opens_persistent_camoufox_profile_when_available():
+    browser = ResultAdapter("browser_skill", JobStatus.SUCCEEDED)
+    camoufox = ResultAdapter("camoufox_gemini", JobStatus.SUCCEEDED)
+
+    result = await AdapterChain("gemini", [browser, camoufox]).login("gemini")
+
+    assert result == {"adapter": "camoufox_gemini"}
+
+
+@pytest.mark.asyncio
 async def test_adapter_chain_falls_back_after_primary_failure():
     primary = ResultAdapter("browser_skill", JobStatus.FAILED)
     fallback = ResultAdapter("ai_search_hub", JobStatus.SUCCEEDED)

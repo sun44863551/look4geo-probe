@@ -46,29 +46,26 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
         artifact_root=root / "data/runs",
     )
     del runtime  # Both callers intentionally use one machine-local adapter policy.
+    chatgpt_browser_id = os.environ.get("LOOK4GEO_CHATGPT_BROWSER_ID", "").strip()
+    chatgpt_browser = BrowserSkillAdapter(
+        client=BskCliClient(chatgpt_browser_id, allow_unconfigured=True),
+        artifact_root=root / "data/runs",
+    )
     chains = {
         "doubao": [browser],
         "deepseek": [browser],
         "yuanbao": [browser],
         "baidu": [browser],
-        "chatgpt": [UnconfiguredAccountAdapter(
-            "chatgpt", "Set LOOK4GEO_CHATGPT_BROWSER_ID to the dedicated Chrome profile extension instance ID"
-        )],
-        "gemini": [UnconfiguredAccountAdapter(
-            "gemini", "Enable and sign in to the isolated Camoufox Gemini profile"
-        )],
+        "chatgpt": [chatgpt_browser],
+        # AI-Search-Hub removes a large Chrome profile after each turn. That
+        # cleanup is intentionally blocked by WorkBuddy's safe-delete guard,
+        # so it cannot serve as a reliable Gemini fallback on this machine.
+        "gemini": [],
         "perplexity": [browser],
         # AI-Search-Hub resets a large debug profile during Grok fallback, which
         # is unsafe inside WorkBuddy's guarded filesystem. Keep Grok local-only.
         "grok": [browser],
     }
-    shared_browser_id = os.environ.get("LOOK4GEO_BROWSER_ID", "")
-    chatgpt_browser_id = os.environ.get("LOOK4GEO_CHATGPT_BROWSER_ID", "")
-    if chatgpt_browser_id and chatgpt_browser_id != shared_browser_id:
-        chains["chatgpt"] = [BrowserSkillAdapter(
-            client=BskCliClient(chatgpt_browser_id),
-            artifact_root=root / "data/runs",
-        )]
     if parse_camoufox_mode(os.environ.get("LOOK4GEO_CAMOUFOX_ENABLED")) != "disabled":
         profile_dir = Path(
             os.environ.get(
@@ -90,13 +87,21 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
             profile_dir,
             root / "data/camoufox/artifacts",
         )
-        chains["gemini"] = [camoufox]
-    gemini_browser_id = os.environ.get("LOOK4GEO_GEMINI_BROWSER_ID", "")
-    if gemini_browser_id and gemini_browser_id != shared_browser_id:
-        chains["gemini"] = [BrowserSkillAdapter(
+        chains["gemini"].append(camoufox)
+    gemini_browser_id = os.environ.get("LOOK4GEO_GEMINI_BROWSER_ID", "").strip()
+    if gemini_browser_id:
+        chains["gemini"].insert(0, BrowserSkillAdapter(
             client=BskCliClient(gemini_browser_id),
             artifact_root=root / "data/runs",
+        ))
+    if not chains["gemini"]:
+        chains["gemini"] = [UnconfiguredAccountAdapter(
+            "gemini", "Configure a dedicated Gemini browser or enable the isolated Camoufox profile"
         )]
+    if os.environ.get("LOOK4GEO_GEMINI_CAMOUFOX_ONLY") == "1":
+        if parse_camoufox_mode(os.environ.get("LOOK4GEO_CAMOUFOX_ENABLED")) == "disabled":
+            raise ValueError("Gemini Camoufox-only mode requires LOOK4GEO_CAMOUFOX_ENABLED=1")
+        chains["gemini"] = [camoufox]
     return {
         platform: AdapterChain(platform, adapters)
         for platform, adapters in chains.items()

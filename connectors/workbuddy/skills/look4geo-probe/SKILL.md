@@ -5,6 +5,8 @@ description: Use when the user asks for GEO measurement, AI visibility, brand me
 
 # Look4GEO Probe
 
+买家基线：日本买家传 `--buyer-baseline japan`，韩国买家传 `korea`，未明确说明默认 `english`，不根据问题语种推断。MCP 使用同名 `buyer_baseline` 参数。保留原问题，不追加提示。每条批量调用均传参数，检查点区分基线。只有 `locale_verified=true` 是经过验证的语言基线；当前仅 ChatGPT BrowserSkill 支持校验，其他渠道不得冒充已验证。语言设置不代表地理位置。
+
 Use the private local CLI at:
 
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local`
@@ -22,6 +24,11 @@ For more than one explicit platform, repeat the existing flag:
 `/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local run "<question>" --mode manual --platform deepseek --platform perplexity --json`
 
 When a known entity or product name must be checked, repeat `--expected-term`, for example `--expected-term DCTA --expected-term 环己二胺四乙酸`.
+
+ChatGPT requires `LOOK4GEO_CHATGPT_BROWSER_ID` from the isolated probe Chrome
+profile. It may equal `LOOK4GEO_BROWSER_ID` when that is the same probe profile.
+If unavailable, suspend ChatGPT; never select the daily browser. See
+`docs/chatgpt-account-isolation.md`.
 
 Gemini uses the preferred `camoufox_gemini` adapter inside this same private
 tool, with BrowserSkill and AI-Search-Hub as fallbacks. Before its first run,

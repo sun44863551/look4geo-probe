@@ -123,6 +123,10 @@ class AdapterChain(ProbeAdapter):
         )
 
     async def login(self, platform: str) -> dict:
+        if platform == "gemini":
+            for adapter in self.adapters:
+                if adapter.name == "camoufox_gemini":
+                    return await adapter.login(platform)
         return await self.adapters[0].login(platform)
 
     async def cancel(self, job_id: str) -> None:

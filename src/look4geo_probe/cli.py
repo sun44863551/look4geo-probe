@@ -7,7 +7,7 @@ from collections.abc import Callable
 import typer
 
 from .doctor import collect_checks, summarize_checks
-from .models import ProbeRequest, RouteMode
+from .models import BuyerBaseline, ProbeRequest, RouteMode
 from .runtime import build_service
 
 app = typer.Typer(no_args_is_help=True)
@@ -36,6 +36,7 @@ def run(
     expected_term: list[str] = typer.Option(None, "--expected-term"),
     timeout: float | None = typer.Option(None, "--timeout", min=1, max=1800),
     repeats: int = typer.Option(1, min=1, max=10),
+    buyer_baseline: BuyerBaseline = typer.Option(BuyerBaseline.ENGLISH, "--buyer-baseline"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     async def execute():
@@ -48,6 +49,7 @@ def run(
         submission = await service.run(
             ProbeRequest(
                 prompt=prompt,
+                buyer_baseline=buyer_baseline,
                 mode=mode,
                 platforms=platform or [],
                 options=options,

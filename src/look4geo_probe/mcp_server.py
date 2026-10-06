@@ -18,6 +18,7 @@ class ProbeMcpTools:
         repeats: int = 1,
         expected_terms: list[str] | None = None,
         timeout: float | None = None,
+        buyer_baseline: str = "english",
     ) -> dict:
         if timeout is not None and not 1 <= timeout <= 1800:
             raise ValueError("timeout must be between 1 and 1800 seconds")
@@ -29,6 +30,7 @@ class ProbeMcpTools:
         submission = await self.service.run(
             ProbeRequest(
                 prompt=prompt,
+                buyer_baseline=buyer_baseline,
                 mode=RouteMode(mode),
                 platforms=platforms or [],
                 options=options,

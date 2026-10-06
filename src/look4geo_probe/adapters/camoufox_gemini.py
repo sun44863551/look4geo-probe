@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import stat
 import sys
 from contextlib import contextmanager
@@ -237,7 +238,8 @@ class GeminiPageDriver:
         while True:
             blocked = await self._blocking_result()
             composer = self.page.locator(COMPOSER_SELECTOR).last
-            if blocked is None and await composer.count():
+            account_menu = self.page.locator('a[aria-label^="Google Account:"]')
+            if blocked is None and await composer.count() and await account_menu.count():
                 return {"platform": "gemini", "status": "succeeded"}
             if loop.time() >= deadline:
                 break
@@ -288,7 +290,9 @@ class GeminiPageDriver:
             await asyncio.sleep(self.poll_interval)
             picker = self.page.locator(MODE_PICKER_SELECTOR).last
         label = (await picker.get_attribute("aria-label") or "").casefold()
-        if "3.8 flash" in label or "currently flash" in label:
+        if re.search(r"currently\s+(?:\d+(?:\.\d+)?\s+)?flash\b(?!-)", label):
+            return True
+        if (await picker.inner_text()).strip().casefold() == "flash":
             return True
         try:
             await picker.click(timeout=3000)
