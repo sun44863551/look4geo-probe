@@ -273,6 +273,7 @@ GEMINI_REFUSAL_MARKERS = (
     "我只是一个语言模型，无法提供",
     "身为一个语言模型，我没办法提供",
     "我只是一个语言模型，不具备",
+    "我只会生成文本，你提出的问题超出了我的程序逻辑范畴",
 )
 GEMINI_TRANSIENT_ERROR_MARKERS = (
     "i seem to be encountering an error",
@@ -1321,6 +1322,19 @@ class BskCliClient:
                 )
                 if record is not None:
                     candidates.append(record)
+            try:
+                sidebar_cards = await self._collect_gemini_view_sources(session_id)
+            except Exception as error:
+                return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
+            for card in sidebar_cards:
+                record = self._source_record(
+                    card,
+                    role=SourceRole.SURFACED,
+                    origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                    excluded_domains=excluded_domains,
+                )
+                if record is not None:
+                    candidates.append(record)
             sources = merge_sources(candidates)
             return (
                 sources,
@@ -1483,6 +1497,90 @@ class BskCliClient:
             cards.extend(dialog_cards)
             await self._run_json("press", "Escape", "--session", session_id, timeout=30)
         return cards
+
+    async def _collect_gemini_view_sources(self, session_id: str) -> list[dict]:
+        """Read the answer's separate View sources sidebar, including scrolled cards."""
+        open_menu = (
+            "(() => { const sidebar = document.querySelector('context-sidebar .all-sources'); "
+            "if (sidebar?.getClientRects().length) return {sidebar_open:true}; "
+            "const buttons = [...document.querySelectorAll('button[aria-label]')]"
+            ".filter(node => node.getClientRects().length && "
+            "/Show more options|更多选项/i.test(node.getAttribute('aria-label') || '')); "
+            "const button = buttons.at(-1); if (!button) return {button_found:false}; "
+            "button.click(); return {button_found:true}; })()"
+        )
+        state = self._result_value(await self._run_json(
+            "evaluate", open_menu, "--session", session_id, timeout=30
+        ))
+        if not isinstance(state, dict) or not state.get("button_found") and not state.get("sidebar_open"):
+            return []
+        if not state.get("sidebar_open"):
+            open_sidebar = (
+                "(() => { const item = [...document.querySelectorAll('[role=menuitem]')]"
+                ".find(node => node.getClientRects().length && "
+                "/^View sources$|^查看来源$|^查看信源$/i.test((node.innerText || '').trim())); "
+                "if (!item) return {found:false}; item.click(); return {found:true}; })()"
+            )
+            result = {"found": False}
+            for _ in range(4):
+                result = self._result_value(await self._run_json(
+                    "evaluate", open_sidebar, "--session", session_id, timeout=30
+                ))
+                if isinstance(result, dict) and result.get("found"):
+                    break
+                await asyncio.sleep(self.poll_interval)
+            if not isinstance(result, dict) or not result.get("found"):
+                await self._run_json("press", "Escape", "--session", session_id, timeout=30)
+                return []
+
+        read_page = (
+            "(() => { const panel = document.querySelector('context-sidebar .all-sources'); "
+            "if (!panel || !panel.getClientRects().length) return {panel_found:false,cards:[]}; "
+            "const cards = [...panel.querySelectorAll('a[href]')].map(anchor => ({"
+            "url:anchor.href,title:(anchor.querySelector('.title')?.innerText || "
+            "anchor.innerText || '').trim() || null,snippet:null})); "
+            "const at_end = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 3; "
+            "if (!at_end) panel.scrollTop = Math.min(panel.scrollHeight, "
+            "panel.scrollTop + Math.max(200,panel.clientHeight - 80)); "
+            "return {panel_found:true,cards,at_end,scroll_top:panel.scrollTop,"
+            "scroll_height:panel.scrollHeight}; })()"
+        )
+        cards: list[dict] = []
+        reached_end = False
+        try:
+            page = {"panel_found": False}
+            for _ in range(4):
+                page = self._result_value(await self._run_json(
+                    "evaluate", read_page, "--session", session_id, timeout=30
+                ))
+                if isinstance(page, dict) and page.get("panel_found"):
+                    break
+                await asyncio.sleep(self.poll_interval)
+            if not isinstance(page, dict) or not page.get("panel_found"):
+                raise RuntimeError("Gemini View sources sidebar did not open")
+            for _ in range(30):
+                cards.extend(page.get("cards") or [])
+                if page.get("at_end"):
+                    reached_end = True
+                    break
+                await asyncio.sleep(self.poll_interval)
+                page = self._result_value(await self._run_json(
+                    "evaluate", read_page, "--session", session_id, timeout=30
+                ))
+                if not isinstance(page, dict) or not page.get("panel_found"):
+                    raise RuntimeError("Gemini View sources sidebar closed before reading completed")
+            if not reached_end:
+                raise RuntimeError("Gemini Sources sidebar did not reach the end")
+            if not cards:
+                raise RuntimeError("Gemini Sources sidebar opened but no source links were read")
+            return list({str(card.get("url") or ""): card for card in cards}.values())
+        finally:
+            close_sidebar = (
+                "(() => { const sidebar = document.querySelector('context-sidebar'); "
+                "const button = sidebar?.querySelector('button[aria-label=\"Close sidebar\"]'); "
+                "if (button?.getClientRects().length) button.click(); return true; })()"
+            )
+            await self._run_json("evaluate", close_sidebar, "--session", session_id, timeout=30)
 
     @staticmethod
     def _source_record(

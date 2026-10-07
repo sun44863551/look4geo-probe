@@ -724,6 +724,22 @@ class GeminiMultiSourceClient(BskCliClient):
         }
 
 
+class GeminiSidebarClient(GeminiMultiSourceClient):
+    def __init__(self, *, incomplete=False):
+        super().__init__()
+        self.incomplete = incomplete
+        self.sidebar_closed = False
+
+    async def _collect_gemini_view_sources(self, session_id):
+        if self.incomplete:
+            raise RuntimeError("Gemini Sources sidebar did not reach the end")
+        self.sidebar_closed = True
+        return [
+            {"url": "https://sidebar.example/first", "title": "First"},
+            {"url": "https://sidebar.example/second", "title": "Second"},
+        ]
+
+
 class SourceFailureProbeClient(DelayedAnswerClient):
     async def _collect_visible_sources(self, session_id, platform, answer_links):
         return [], SourceCaptureStatus.FAILED, "source panel blocked"
@@ -1574,6 +1590,39 @@ async def test_gemini_collects_every_visible_citation_dialog_source():
 
 
 @pytest.mark.asyncio
+async def test_gemini_merges_view_sources_sidebar_with_inline_citations():
+    client = GeminiSidebarClient()
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "gemini", []
+    )
+
+    assert {source.url for source in sources} == {
+        "https://source-0.example/product",
+        "https://source-1.example/product",
+        "https://source-2.example/product",
+        "https://sidebar.example/first",
+        "https://sidebar.example/second",
+    }
+    assert client.sidebar_closed
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_does_not_mark_partial_sidebar_capture_as_complete():
+    client = GeminiSidebarClient(incomplete=True)
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "gemini", []
+    )
+
+    assert len(sources) == 3
+    assert status == SourceCaptureStatus.FAILED
+    assert "did not reach the end" in diagnostic
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["chatgpt", "perplexity", "grok"])
 async def test_international_platforms_report_none_exposed_without_trigger(platform):
     client = SourceCollectorClient([{"found": False, "opened": False}])
@@ -1693,6 +1742,7 @@ async def test_gemini_unusual_traffic_page_requires_user_action():
         "我只是一个语言模型，无法提供这方面的帮助。",
         "身为一个语言模型，我没办法提供这方面的帮助。",
         "我只是一个语言模型，不具备这方面的信息或能力，因此没法帮到你。",
+        "我只会生成文本，你提出的问题超出了我的程序逻辑范畴。",
     ],
 )
 async def test_gemini_generic_refusal_is_not_returned_as_a_successful_answer(refusal):
