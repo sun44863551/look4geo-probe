@@ -437,13 +437,13 @@ async def test_grok_uses_native_key_events_when_all_fill_targets_rerender():
 
 
 @pytest.mark.asyncio
-async def test_grok_submits_through_stable_selector_not_stale_ref():
+async def test_grok_clicks_submit_button_not_enter_in_multiline_composer():
     client = FillFallbackClient()
 
     await client._submit_prompt("session", "grok", "@stale")
 
-    assert client.calls[-1][0:2] == ("press", "Enter")
-    assert "--selector" in client.calls[-1]
+    assert client.calls[-1][0] == "click"
+    assert 'button[aria-label="Submit"]' in client.calls[-1][1]
     assert "@stale" not in client.calls[-1]
 
 
@@ -668,6 +668,30 @@ class SourceCollectorClient(BskCliClient):
         except StopIteration:
             pass
         return self.last_panel_page
+
+
+class GrokAccordionClient(BskCliClient):
+    def __init__(self):
+        super().__init__("browser", poll_interval=0)
+        self.steps = 0
+        self.clicks = 0
+
+    async def _source_panel_page(self, session_id, platform):
+        count = min(self.steps + 1, 3)
+        return {
+            "panel_found": True,
+            "expected_count": 3,
+            "collapsed_count": max(0, 2 - self.steps),
+            "cards": [
+                {"url": f"https://source-{index}.example/", "title": f"Source {index}"}
+                for index in range(count)
+            ],
+        }
+
+    async def _run_json(self, *args, timeout=30.0):
+        self.clicks += 1
+        self.steps += 1
+        return {"value": True}
 
 
 class GeminiMultiSourceClient(BskCliClient):
@@ -1516,6 +1540,17 @@ async def test_international_platforms_collect_cited_and_surfaced_fixture_source
     assert sources[0].evidence_origin == SourceEvidenceOrigin.ANSWER_DOM
     assert status == SourceCaptureStatus.CAPTURED
     assert diagnostic is None
+
+
+@pytest.mark.asyncio
+async def test_grok_expands_each_source_search_group_before_counting_cards():
+    client = GrokAccordionClient()
+
+    page = await client._expand_grok_source_sections("session", expected_count=3)
+
+    assert client.clicks == 2
+    assert page["collapsed_count"] == 0
+    assert len(page["cards"]) == 3
 
 
 @pytest.mark.asyncio

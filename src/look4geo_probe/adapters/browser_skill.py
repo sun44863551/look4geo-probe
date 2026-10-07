@@ -1098,13 +1098,9 @@ class BskCliClient:
             return
         if platform == "grok":
             await self._run_json(
-                "press",
-                "Enter",
-                "--selector",
-                PLATFORMS[platform]["composer_selector"],
-                "--session",
-                session_id,
-                timeout=timeout,
+                "click",
+                'button[aria-label="Submit"], button[type="submit"]',
+                "--session", session_id, timeout=timeout,
             )
             return
         if textbox_ref:
@@ -1384,17 +1380,23 @@ class BskCliClient:
         stable_cards: list[dict] = []
         panel_found = False
         expected_count = int(open_state.get("expected_count") or 0)
-        for _ in range(4):
-            panel_page = await self._source_panel_page(session_id, platform)
-            panel_found = panel_found or bool(panel_page.get("panel_found"))
+        if platform == "grok" and expected_count:
+            panel_page = await self._expand_grok_source_sections(session_id, expected_count)
+            panel_found = bool(panel_page.get("panel_found"))
             expected_count = max(expected_count, int(panel_page.get("expected_count") or 0))
-            cards = list(panel_page.get("cards", [])) if isinstance(panel_page, dict) else []
-            if previous_cards is not None and cards == previous_cards:
+            stable_cards = list(panel_page.get("cards", []))
+        else:
+            for _ in range(4):
+                panel_page = await self._source_panel_page(session_id, platform)
+                panel_found = panel_found or bool(panel_page.get("panel_found"))
+                expected_count = max(expected_count, int(panel_page.get("expected_count") or 0))
+                cards = list(panel_page.get("cards", [])) if isinstance(panel_page, dict) else []
+                if previous_cards is not None and cards == previous_cards:
+                    stable_cards = cards
+                    break
+                previous_cards = cards
                 stable_cards = cards
-                break
-            previous_cards = cards
-            stable_cards = cards
-            await asyncio.sleep(self.poll_interval)
+                await asyncio.sleep(self.poll_interval)
 
         valid_cards = 0
         panel_records: list[SourceRecord] = []
@@ -1425,6 +1427,32 @@ class BskCliClient:
             f"inspected {valid_cards}/{expected_count} advertised source cards; stored {len(sources)} unique sources"
             if expected_count else None
         )
+
+    async def _expand_grok_source_sections(self, session_id: str, expected_count: int) -> dict:
+        """Grok hides search results in separate, lazily rendered accordions."""
+        page: dict = {"panel_found": False, "cards": [], "collapsed_count": 0}
+        for _ in range(20):
+            page = await self._source_panel_page(session_id, "grok")
+            if not page.get("panel_found") or not page.get("collapsed_count"):
+                break
+            result = await self._run_json(
+                "evaluate",
+                "(() => { const panel = [...document.querySelectorAll('aside')]"
+                ".find(node => node.getClientRects().length && "
+                "(node.innerText || '').trim().startsWith('Sources')); "
+                "const button = panel?.querySelector('button[aria-controls][aria-expanded=\"false\"]'); "
+                "if (!button) return false; button.click(); return true; })()",
+                "--session", session_id, timeout=30,
+            )
+            if not self._result_value(result):
+                break
+            await asyncio.sleep(self.poll_interval)
+        for _ in range(4):
+            page = await self._source_panel_page(session_id, "grok")
+            if len(page.get("cards", [])) >= expected_count or not page.get("collapsed_count"):
+                break
+            await asyncio.sleep(self.poll_interval)
+        return page
 
     async def _collect_gemini_source_cards(self, session_id: str) -> list[dict]:
         observation = await self._run_json(
@@ -1480,6 +1508,23 @@ class BskCliClient:
         )
 
     async def _open_source_panel(self, session_id: str, platform: str) -> dict:
+        if platform == "grok":
+            expression = (
+                "(() => { const triggers = [...document.querySelectorAll("
+                "'[role=button][aria-label*=source i]')].filter(node => node.getClientRects().length); "
+                "const trigger = triggers.at(-1); if (!trigger) "
+                "return {found:false,opened:false,expected_count:0}; "
+                "const match = (trigger.getAttribute('aria-label') || '').match(/(\\d+)\\s+sources?/i); "
+                "const expected_count = match ? Number(match[1]) : 0; "
+                "const panel = [...document.querySelectorAll('aside')].find(node => "
+                "node.getClientRects().length && (node.innerText || '').trim().startsWith('Sources')); "
+                "if (panel) return {found:true,opened:true,expected_count}; "
+                "try { trigger.click(); return {found:true,opened:true,expected_count}; } "
+                "catch (error) { return {found:true,opened:false,expected_count,diagnostic:String(error)}; } })()"
+            )
+            result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"found": False, "opened": False}
         if platform == "baidu":
             expression = (
                 "(() => { const root = [...document.querySelectorAll('.ai-entry')].at(-1); "
@@ -1590,6 +1635,19 @@ class BskCliClient:
         )
 
     async def _source_panel_page(self, session_id: str, platform: str) -> dict:
+        if platform == "grok":
+            expression = (
+                "(() => { const panel = [...document.querySelectorAll('aside')].find(node => "
+                "node.getClientRects().length && (node.innerText || '').trim().startsWith('Sources')); "
+                "if (!panel) return {panel_found:false,cards:[],collapsed_count:0}; "
+                "const cards = [...panel.querySelectorAll('a.block[href]')].map(anchor => ({"
+                "url:anchor.href,title:(anchor.innerText || '').trim() || null,snippet:null})); "
+                "const collapsed_count = panel.querySelectorAll('button[aria-controls][aria-expanded=\"false\"]').length; "
+                "return {panel_found:true,cards,collapsed_count}; })()"
+            )
+            result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+            value = self._result_value(result)
+            return value if isinstance(value, dict) else {"panel_found": False, "cards": []}
         if platform == "gemini":
             expression = (
                 "(() => { const panel = [...document.querySelectorAll('[role=dialog]')]"
