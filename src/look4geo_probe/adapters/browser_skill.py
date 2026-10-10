@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -47,10 +48,17 @@ PLATFORMS = {
     "chatgpt": {
         "url": "https://chatgpt.com/",
         "textbox": ("给 ChatGPT 发消息", "询问 ChatGPT", "与 ChatGPT 聊天", "Chat with ChatGPT"),
-        "composer_selector": 'div[contenteditable="true"]',
+        # 2026-10-10 (CG-14): the composer is no longer a `#prompt-textarea` textarea —
+        # ChatGPT now renders a ProseMirror `div[contenteditable]` with no id. Keep the
+        # legacy selector first, then fall back to the current structures.
+        "composer_selector": '#prompt-textarea, div.ProseMirror[contenteditable="true"], div[contenteditable="true"][role="textbox"]',
         "login_markers": ("登录", "注册"),
         "conversation_marker": "/c/",
-        "answer_selector": '[data-message-author-role="assistant"] .markdown',
+        # 2026-10-10 (CG-14): assistant turns lost `data-message-author-role` and the
+        # `.markdown` class; the answer body is now the (unhashed) semantic hook
+        # `data-markdown-text-style="assistant-message"`. Keep the legacy selectors
+        # last for backward compatibility.
+        "answer_selector": '[data-markdown-text-style="assistant-message"], [data-message-author-role="assistant"] [data-dil-widget-copy-target], [data-message-author-role="assistant"] .markdown',
     },
     "deepseek": {
         "url": "https://chat.deepseek.com/",
@@ -248,6 +256,9 @@ TRANSIENT_ANSWER_LINES = {
     "核查供应商资料",
 }
 RATE_LIMIT_MARKERS = (
+    "too many requests",
+    "问答过频",
+    "暂时限制你访问对话记录",
     "429",
     "rate limit",
     "请求过于频繁",
@@ -314,6 +325,7 @@ def command_error_detail(stdout: bytes, stderr: bytes) -> str:
 
 @dataclass(frozen=True)
 class BrowserProbeOutput:
+    conversation_url: str | None = None
     answer: str = ""
     citations: list[str] = field(default_factory=list)
     sources: list[SourceRecord] = field(default_factory=list)
@@ -522,7 +534,7 @@ class BskCliClient:
                 "from the probe Chrome profile. No daily-browser fallback is allowed."
             )
         args = ["session", "start", "--browser", self.browser_instance_id]
-        if platform != "gemini":
+        if platform not in {"gemini", "chatgpt"}:
             args.append("--no-focus")
         result = await self._run_json(*args)
         return str(result["session_id"])
@@ -546,6 +558,8 @@ class BskCliClient:
         await self._dismiss_blocking_overlays(session_id, platform)
         observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
         page_text = str(observation.get("text", ""))
+        if platform == "chatgpt" and page_is_rate_limited({"page_text": page_text}):
+            return BrowserProbeOutput(failure=FailureKind.RATE_LIMITED, diagnostic=rate_limit_diagnostic({"page_text": page_text}))
         if page_requires_human_verification({"page_text": page_text}):
             return BrowserProbeOutput(
                 login_required=True,
@@ -627,7 +641,21 @@ class BskCliClient:
                     diagnostic="login required after submission",
                 )
             if page_is_rate_limited(page):
+                # Preserve only the answer delta for this submission, never old history.
+                captured = select_main_answer(platform, [
+                    text for text in answers_after_baseline(
+                        [str(value) for value in page.get("answers", [])], baseline
+                    ) if not is_prompt_echo(text, prompt)
+                ]) if platform == "chatgpt" else ""
+                try:
+                    conversation_url = await self._current_url(session_id)
+                except Exception:
+                    conversation_url = None
                 return BrowserProbeOutput(
+                    answer=captured,
+                    conversation_url=conversation_url,
+                    source_capture_status=SourceCaptureStatus.FAILED,
+                    source_capture_diagnostic="Rate limit interrupted capture; visible text is unverified evidence, not a complete sample",
                     failure=FailureKind.RATE_LIMITED,
                     diagnostic=rate_limit_diagnostic(page),
                 )
@@ -740,6 +768,39 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "chatgpt":
+            selector = PLATFORMS["chatgpt"]["composer_selector"]
+            # CG-14 (2026-10-10): the composer is now a ProseMirror `div[contenteditable]`,
+            # and `bsk fill` is unreliable against it — its default clear-first pass trips
+            # "the fill target changed during the action" (React rebuilds the editable node),
+            # while `--no-clear` appends instead of replacing (residue then breaks the exact
+            # match) and its own confirmation can fail even when the text landed. Type through
+            # `evaluate` + `execCommand` instead: focus, select all, insert, then verify by
+            # reading the composer. That is the same deterministic path used for other
+            # contenteditable platforms below.
+            expression = (
+                "(() => { const nodes = [...document.querySelectorAll("
+                + json.dumps(selector)
+                + ")]; const target = nodes.find(node => node.getClientRects().length); "
+                "if (!target) return ''; target.focus(); "
+                "document.execCommand('selectAll', false, null); "
+                "document.execCommand('insertText', false, "
+                + json.dumps(prompt)
+                + "); target.dispatchEvent(new InputEvent('input', {bubbles:true,"
+                "inputType:'insertText',data:" + json.dumps(prompt) + "})); "
+                "return target.innerText || target.textContent || ''; })()"
+            )
+            for _ in range(3):
+                await self._run_json(
+                    "click", selector, "--session", session_id, timeout=timeout
+                )
+                await self._run_json(
+                    "evaluate", expression, "--session", session_id, timeout=timeout
+                )
+                if (await self._composer_text(session_id, selector)).strip() == prompt.strip():
+                    return
+                await asyncio.sleep(self.poll_interval)
+            raise RuntimeError("ChatGPT prompt entry could not be verified after 3 attempts")
         if platform == "doubao":
             selector = PLATFORMS[platform]["composer_selector"]
             expression = (
@@ -1040,6 +1101,11 @@ class BskCliClient:
                         return
             raise RuntimeError("Gemini submission state did not change after 3 attempts")
         if platform == "chatgpt":
+            before = await self._composer_text(
+                session_id, PLATFORMS["chatgpt"]["composer_selector"]
+            )
+            if not before.strip():
+                raise RuntimeError("ChatGPT prompt entry could not be verified before submission")
             state_expression = (
                 "(() => { const composer = [...document.querySelectorAll("
                 + json.dumps(PLATFORMS["chatgpt"]["composer_selector"])
@@ -1053,9 +1119,13 @@ class BskCliClient:
             for attempt in range(3):
                 try:
                     if attempt == 0:
+                        # CG-14: the composer's send control lost its `data-testid`;
+                        # it is now an unlabelled-by-testid button whose aria-label is
+                        # locale dependent. Match by testid first, then by aria-label.
                         await self._run_json(
                             "click",
-                            'button[aria-label*="发送" i], button[aria-label*="Send" i]',
+                            '[data-testid="send-button"], button[aria-label="发送"], '
+                            'button[aria-label="Send"], button[aria-label*="送信"]',
                             "--session", session_id, timeout=timeout,
                         )
                     else:
@@ -1920,7 +1990,22 @@ class BrowserSkillAdapter(ProbeAdapter):
             self.artifact_root.parent / ".browser_skill.lock"
         )
 
+    def _cooldown_path(self) -> Path:
+        browser_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(getattr(self.client, "browser_instance_id", "configured")))
+        return self.artifact_root / f".chatgpt-cooldown-{browser_id}.json"
+
+    def _cooldown_remaining(self) -> float:
+        path = self._cooldown_path()
+        if not path.exists():
+            return 0
+        try:
+            return max(0, float(json.loads(path.read_text())["retry_after_epoch"]) - time.time())
+        except (ValueError, KeyError, OSError, TypeError):
+            return float("inf")  # Corrupt pause state must not silently unlock an account.
+
     async def health(self, platform: str) -> AdapterHealth:
+        if platform == "chatgpt" and self._cooldown_remaining():
+            return AdapterHealth(False, "ChatGPT rate-limit cooldown active; wait, do not auto-unblock")
         if platform == "chatgpt" and isinstance(self.client, BskCliClient) and not self.client.browser_instance_id:
             return AdapterHealth(False, "ChatGPT sampling suspended: configure LOOK4GEO_CHATGPT_BROWSER_ID for the probe Chrome profile")
         if platform in PLATFORMS and hasattr(self.client, "browser_health"):
@@ -1936,7 +2021,18 @@ class BrowserSkillAdapter(ProbeAdapter):
 
     async def run(self, platform: str, request: ProbeRequest) -> PlatformAttempt:
         async with self.operation_lock:
-            return await self._run_exclusive(platform, request)
+            if platform == "chatgpt" and self._cooldown_remaining():
+                return PlatformAttempt(platform=platform, adapter=self.name, status=JobStatus.FAILED,
+                    failure=FailureKind.RATE_LIMITED, diagnostic="ChatGPT cooldown active; no browser request sent")
+            result = await self._run_exclusive(platform, request)
+            if platform == "chatgpt" and result.failure == FailureKind.RATE_LIMITED:
+                self.artifact_root.mkdir(parents=True, exist_ok=True)
+                self._cooldown_path().write_text(json.dumps({
+                    "retry_after_epoch": time.time() + 1800,
+                    "reason": result.diagnostic,
+                    "note": "30 minute local backoff, not platform quota reset time",
+                }))
+            return result
 
     async def _run_exclusive(
         self, platform: str, request: ProbeRequest
@@ -2016,6 +2112,11 @@ class BrowserSkillAdapter(ProbeAdapter):
                 )
             if output.failure is not None:
                 return PlatformAttempt(
+                    raw_answer=output.answer,
+                    normalized_answer=output.answer.strip(),
+                    conversation_url=output.conversation_url,
+                    source_capture_status=output.source_capture_status,
+                    source_capture_diagnostic=output.source_capture_diagnostic,
                     locale_verified=locale_verified,
                     platform=platform,
                     adapter=self.name,
@@ -2057,7 +2158,10 @@ class BrowserSkillAdapter(ProbeAdapter):
             failure = FailureKind.UNKNOWN
             if (
                 platform in {"gemini", "chatgpt"}
-                and "submission state did not change" in diagnostic.casefold()
+                and (
+                    "submission state did not change" in diagnostic.casefold()
+                    or "prompt entry could not be verified" in diagnostic.casefold()
+                )
             ):
                 failure = FailureKind.SEND_FAILED
             return PlatformAttempt(

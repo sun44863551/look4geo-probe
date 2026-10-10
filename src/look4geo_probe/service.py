@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .jobs import JobManager
 from .models import (
+    FailureKind,
     JobStatus,
     PlatformHealth,
     ProbeRequest,
@@ -80,6 +81,8 @@ class ProbeService:
                             }
                         )
                     )
+                    if attempt.failure == FailureKind.RATE_LIMITED:
+                        break  # Do not spend remaining repeats against a confirmed wall.
         except asyncio.CancelledError:
             diagnostic = "cancelled: worker stopped before completion"
             result = ProbeResult(

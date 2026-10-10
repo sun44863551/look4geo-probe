@@ -52,9 +52,7 @@ def test_browser_skill_defines_every_probe_platform():
 
 
 def test_chatgpt_answer_selector_targets_current_assistant_markdown():
-    assert PLATFORMS["chatgpt"]["answer_selector"] == (
-        '[data-message-author-role="assistant"] .markdown'
-    )
+    assert '[data-message-author-role="assistant"] .markdown' in PLATFORMS["chatgpt"]["answer_selector"]
 
 
 def test_perplexity_selects_longest_answer_not_follow_up():
@@ -170,9 +168,7 @@ def test_textbox_lookup_accepts_logged_in_yuanbao_english_label():
     ) == "@e13"
 
 def test_chatgpt_extracts_only_current_assistant_markdown():
-    assert PLATFORMS["chatgpt"]["answer_selector"] == (
-        '[data-message-author-role="assistant"] .markdown'
-    )
+    assert '[data-message-author-role="assistant"] .markdown' in PLATFORMS["chatgpt"]["answer_selector"]
 
 
 def test_baidu_uses_current_official_entry_and_stable_dom_boundaries():
@@ -243,10 +239,10 @@ async def test_gemini_session_starts_in_foreground_for_real_keyboard_events():
 
 
 @pytest.mark.asyncio
-async def test_non_gemini_session_remains_backgrounded():
+async def test_non_keyboard_platform_session_remains_backgrounded():
     client = SessionStartClient()
 
-    assert await client.start("chatgpt") == "session-test"
+    assert await client.start("deepseek") == "session-test"
     assert client.calls == [
         ("session", "start", "--browser", "browser-test", "--no-focus")
     ]
@@ -495,6 +491,9 @@ class ChatGPTSubmitClient(BskCliClient):
         super().__init__("browser", poll_interval=0)
         self.states = iter(states)
         self.calls = []
+
+    async def _composer_text(self, session_id, selector):
+        return "test question"
 
     async def _run_json(self, *args, timeout=30.0):
         self.calls.append(args)
@@ -1119,12 +1118,14 @@ async def test_disabled_send_control_times_out_without_submitting():
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_falls_back_to_native_insert_text_when_fill_target_changes():
+async def test_chatgpt_rejects_unverified_fill_instead_of_native_insert_fallback():
     client = FillFallbackClient()
-    await client._enter_prompt("session", "chatgpt", "@e42", "hello")
+    with pytest.raises(RuntimeError, match="ChatGPT prompt entry could not be verified"):
+        await client._enter_prompt("session", "chatgpt", "@e42", "hello")
     commands = [call[0] for call in client.calls]
-    assert commands == ["fill", "click", "press", "press", "evaluate"]
-    assert "insertText" in client.calls[-1][1]
+    assert commands.count("click") == 3
+    assert "fill" not in commands
+    assert "press" not in commands
 
 
 @pytest.mark.asyncio
@@ -1178,7 +1179,7 @@ async def test_chatgpt_submits_using_native_send_button():
     click = next(call for call in client.calls if call[0] == "click")
     assert click[:2] == (
         "click",
-        'button[aria-label*="发送" i], button[aria-label*="Send" i]',
+        '[data-testid="send-button"], button[aria-label="发送"], button[aria-label="Send"], button[aria-label*="送信"]',
     )
 
 

@@ -134,6 +134,7 @@ class SourceRecord(StrictModel):
 
 
 class PlatformAttempt(StrictModel):
+    conversation_url: str | None = None
     buyer_baseline: BuyerBaseline | None = None
     buyer_locale: str | None = None
     locale_verified: bool | None = None
