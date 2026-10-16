@@ -176,9 +176,7 @@ def test_baidu_uses_current_official_entry_and_stable_dom_boundaries():
 
     assert config["url"] == "https://chat.baidu.com/"
     assert config["composer_selector"] == "textarea.ci-textarea"
-    assert config["answer_selector"] == (
-        ".ai-entry-block.ai-markdown, .chat-search-answer-generate"
-    )
+    assert config["answer_selector"] == ".ai-entry"
     assert config["conversation_marker"] == "/search/"
 
 
@@ -669,6 +667,22 @@ class SourceCollectorClient(BskCliClient):
         return self.last_panel_page
 
 
+@pytest.mark.asyncio
+async def test_invalid_yuanbao_reference_is_reported_without_exposing_url_userinfo():
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True, "expected_count": 1}],
+        [{"panel_found": True, "expected_count": 1, "cards": [
+            {"url": "https://support@example.org/paper", "title": "GEO comparison"}
+        ]}],
+    )
+    sources, status, diagnostic = await client._collect_visible_sources("session", "yuanbao", [])
+    assert sources == []
+    assert status == SourceCaptureStatus.FAILED
+    assert "rejected 1 malformed, unsafe or excluded URLs" in diagnostic
+    assert "GEO comparison" in diagnostic
+    assert "support@" not in diagnostic
+
+
 class GrokAccordionClient(BskCliClient):
     def __init__(self):
         super().__init__("browser", poll_interval=0)
@@ -757,6 +771,35 @@ def configure_source_panel(monkeypatch, platform="chatgpt"):
 
 
 DOMESTIC_SOURCE_FIXTURES = Path(__file__).parent / "fixtures" / "source_dom"
+
+
+@pytest.mark.asyncio
+async def test_baidu_answer_joins_markdown_blocks_without_expanded_reference_list():
+    if not shutil.which("node"):
+        pytest.skip("Node.js not installed")
+
+    class DomClient(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            harness = r'''
+const link = {href:'https://example.org/paper',innerText:'Paper'};
+const blocks = [
+ {innerText:'GEO definition',querySelectorAll:()=>[link]},
+ {innerText:'Detailed explanation',querySelectorAll:()=>[]}
+];
+const turn = {innerText:'搜索全网36篇资料\nReference list\nGEO definition\nDetailed explanation',
+ querySelectorAll:s=>s==='.ai-entry-block.ai-markdown'?blocks:[link]};
+global.document = {body:{innerText:turn.innerText},querySelectorAll:s=>
+ s==='.ai-entry'?[turn]:[]};
+global.location = {hostname:'wenxin.baidu.com'};
+process.stdout.write(JSON.stringify(eval(process.argv[1])));
+'''
+            result = subprocess.run(["node", "-e", harness, args[1]], capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            return {"value": json.loads(result.stdout)}
+
+    page = await DomClient("browser")._answer_page("session", PLATFORMS["baidu"]["answer_selector"])
+    assert page["answers"] == ["GEO definition\n\nDetailed explanation"]
+    assert page["answer_entries"][0]["links"] == [{"url": "https://example.org/paper", "title": "Paper"}]
 
 
 def load_source_fixture(platform):
@@ -894,6 +937,9 @@ async def test_doubao_prompt_entry_verifies_native_editor_value():
             super().__init__("browser")
             self.calls = []
 
+        async def _dismiss_blocking_overlays(self, *args):
+            return False
+
         async def _run_json(self, *args, timeout=30):
             self.calls.append(args)
             return {"value": "GEO 核验问题"}
@@ -903,6 +949,54 @@ async def test_doubao_prompt_entry_verifies_native_editor_value():
     assert client.calls[0][0] == "evaluate"
     assert "selectNodeContents(target)" in client.calls[0][1]
     assert "@e-old" not in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_doubao_entry_retries_after_editor_remount_and_late_promotion():
+    class RemountClient(BskCliClient):
+        def __init__(self):
+            super().__init__("browser", poll_interval=0)
+            self.reads = 0
+            self.dismissals = 0
+
+        async def _dismiss_blocking_overlays(self, *args):
+            self.dismissals += 1
+            return True
+
+        async def _run_json(self, *args, timeout=30):
+            return {"value": ""}  # Detached editor returned no text.
+
+        async def _composer_text(self, *args):
+            self.reads += 1
+            return "GEO 核验问题" if self.reads > 1 else ""
+
+    client = RemountClient()
+    await client._enter_prompt("session", "doubao", None, "GEO 核验问题")
+    assert client.reads == 2
+    assert client.dismissals == 2
+
+
+@pytest.mark.asyncio
+async def test_doubao_current_download_promo_closes_without_clicking_download():
+    if not shutil.which("node"):
+        pytest.skip("Node.js not installed")
+
+    class PromoClient(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            script = r'''
+let clicked = '';
+const buttons = ['下载豆包工作','下次提醒我','关闭'].map(text=>({
+ innerText:text,getAttribute:()=>'',click:()=>{clicked=text;}}));
+const dialog = {innerText:'下载电脑版 使用完整功能',querySelectorAll:()=>buttons};
+global.document = {querySelectorAll:()=>[dialog]};
+eval(process.argv[1]); process.stdout.write(JSON.stringify(clicked));
+'''
+            result = subprocess.run(["node", "-e", script, args[1]], capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout) in {"关闭", "下次提醒我"}
+            return {"value": True}
+
+    assert await PromoClient("browser")._dismiss_blocking_overlays("session", "doubao")
 
 
 @pytest.mark.asyncio
@@ -982,6 +1076,49 @@ async def test_doubao_twelve_references_are_recorded_when_all_are_visible():
     assert len(sources) == 12
     assert status == SourceCaptureStatus.CAPTURED
     assert "12/12" in diagnostic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["doubao", "yuanbao", "baidu"])
+async def test_source_collector_waits_for_advertised_count_after_stable_partial_page(platform):
+    partial = [{"url": f"https://example.org/source-{index}"} for index in range(16)]
+    complete = partial + [{"url": "https://example.org/source-16"}]
+    pages = [
+        {"panel_found": True, "expected_count": 17, "cards": partial},
+        {"panel_found": True, "expected_count": 17, "cards": partial},
+        {"panel_found": True, "expected_count": 17, "cards": complete},
+    ]
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True, "expected_count": 17}], pages
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", platform, []
+    )
+
+    assert len(sources) == 17
+    assert status == SourceCaptureStatus.CAPTURED
+    assert "17/17" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_source_collector_waits_for_late_panel_without_advertised_count():
+    client = SourceCollectorClient(
+        [{"found": True, "opened": True}],
+        [
+            {"panel_found": False, "cards": []},
+            {"panel_found": False, "cards": []},
+            {"panel_found": True, "cards": [{"url": "https://example.org/source"}]},
+        ],
+    )
+
+    sources, status, diagnostic = await client._collect_visible_sources(
+        "session", "deepseek", []
+    )
+
+    assert len(sources) == 1
+    assert status == SourceCaptureStatus.CAPTURED
+    assert diagnostic is None
 
 
 @pytest.mark.asyncio
@@ -1673,6 +1810,13 @@ def test_perplexity_links_stay_scoped_to_selected_longest_answer():
     ) == [{"url": "https://evidence.example", "title": "Evidence"}]
 
 
+def test_baidu_selects_full_answer_instead_of_last_follow_up_fragment():
+    full = "这是完整回答。" * 30
+    follow_up = "需要我再帮你整理清单吗？"
+
+    assert select_main_answer("baidu", [full, follow_up]) == full
+
+
 @pytest.mark.asyncio
 async def test_baidu_transient_controls_are_not_accepted_as_answers():
     client = DelayedAnswerClient(
@@ -2043,6 +2187,33 @@ class FakeBrowserClient:
 
     async def stop(self, session_id):
         self.stopped.append(session_id)
+
+
+class TransientBrowserClient(FakeBrowserClient):
+    async def probe(self, session_id, platform, prompt, timeout):
+        if not self.stopped:
+            raise RuntimeError(self.error)
+        self.error = None
+        return await super().probe(session_id, platform, prompt, timeout)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform,error", [
+    ("deepseek", "cdp_failed: Page.navigate rejected: net::ERR_NETWORK_CHANGED"),
+    ("doubao", "message textbox not found for doubao"),
+    ("yuanbao", "not_found: session not registered or already stopped"),
+])
+async def test_domestic_adapter_retries_transient_browser_errors(tmp_path: Path, platform, error):
+    client = TransientBrowserClient(
+        output=BrowserProbeOutput(answer="Recovered answer"), error=error
+    )
+    adapter = BrowserSkillAdapter(client=client, artifact_root=tmp_path)
+
+    attempt = await adapter.run(platform, ProbeRequest(prompt="测试", options={"timeout": 30}))
+
+    assert attempt.status == JobStatus.SUCCEEDED
+    assert client.started == [platform, platform]
+    assert client.stopped == ["session-1", "session-2"]
 
 
 @pytest.mark.asyncio

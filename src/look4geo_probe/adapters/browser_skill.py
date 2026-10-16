@@ -93,7 +93,7 @@ PLATFORMS = {
         "composer_selector": "textarea.ci-textarea",
         "login_markers": ("请登录", "登录同步历史对话"),
         "conversation_marker": "/search/",
-        "answer_selector": ".ai-entry-block.ai-markdown, .chat-search-answer-generate",
+        "answer_selector": ".ai-entry",
     },
     "gemini": {
         "url": "https://gemini.google.com/app",
@@ -363,7 +363,7 @@ def select_main_answer(platform: str, candidates: list[str]) -> str:
     usable = [candidate.strip() for candidate in candidates if is_valid_answer(candidate)]
     if not usable:
         return ""
-    if platform in {"perplexity", "yuanbao"}:
+    if platform in {"perplexity", "yuanbao", "baidu"}:
         return max(usable, key=len)
     return usable[-1]
 
@@ -814,10 +814,15 @@ class BskCliClient:
                 + json.dumps(prompt)
                 + "); return target.innerText || ''; })()"
             )
-            result = await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
-            if str(self._result_value(result) or "").strip() != prompt.strip():
-                raise RuntimeError("Doubao prompt entry could not be verified")
-            return
+            for _ in range(3):
+                await self._dismiss_blocking_overlays(session_id, platform)
+                await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
+                # The editor can be replaced during initial hydration. Read the
+                # current node, not the detached node used by insertText.
+                if (await self._composer_text(session_id, selector)).strip() == prompt.strip():
+                    return
+                await asyncio.sleep(self.poll_interval)
+            raise RuntimeError("Doubao prompt entry could not be verified after 3 attempts")
         if platform == "gemini":
             selector = PLATFORMS[platform]["composer_selector"]
             target = ("--ref", textbox_ref) if textbox_ref else ("--selector", selector)
@@ -995,14 +1000,14 @@ class BskCliClient:
     async def _dismiss_blocking_overlays(self, session_id: str, platform: str) -> bool:
         if platform not in {"doubao", "baidu"}:
             return False
-        marker = "下载豆包电脑版" if platform == "doubao" else "全新上线任务模式"
+        markers = ("下载豆包电脑版", "下载电脑版 使用完整功能") if platform == "doubao" else ("全新上线任务模式",)
         expression = (
-            "(() => { const marker = " + json.dumps(marker, ensure_ascii=False) + "; "
+            "(() => { const markers = " + json.dumps(markers, ensure_ascii=False) + "; "
             "const candidates = [...document.querySelectorAll('[role=dialog],body > div')]; "
-            "const promo = candidates.find(node => (node.innerText || '').includes(marker)); "
+            "const promo = candidates.find(node => markers.some(marker => (node.innerText || '').includes(marker))); "
             "if (!promo) return false; const controls = [...promo.querySelectorAll('button')]; "
-            "const close = controls.find(node => /^(关闭|close)$/i.test(((node.getAttribute('aria-label') "
-            "|| '') + ' ' + (node.innerText || '')).trim())) || controls[0]; if (!close) return false; "
+            "const close = controls.find(node => /^(关闭|close|下次提醒我|暂不体验|稍后再说)$/i.test("
+            "node.getAttribute('aria-label') || (node.innerText || '').trim())); if (!close) return false; "
             "close.click(); return true; })()"
         )
         result = await self._run_json(
@@ -1019,6 +1024,7 @@ class BskCliClient:
         timeout: float = 30.0,
     ) -> None:
         if platform == "doubao":
+            await self._dismiss_blocking_overlays(session_id, platform)
             observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
             send_ref = self._find_button_ref(str(observation.get("text", "")), ("Chat input send", "发送"))
             if not send_ref:
@@ -1326,19 +1332,25 @@ class BskCliClient:
             "(() => { const nodes = [...document.querySelectorAll("
             + json.dumps(selector)
             + ")]; const bodyText = document.body ? (document.body.innerText || '') : ''; "
+            # Baidu splits a turn into multiple markdown blocks. Its enclosing
+            # answer container also includes the expanded search results.
+            "const answerBlocks = n => "
+            + ("[...n.querySelectorAll('.ai-entry-block.ai-markdown')]" if selector == ".ai-entry" else "[n]")
+            + "; const answerText = n => answerBlocks(n).map(b => (b.innerText || '').trim()).filter(Boolean).join('\\n\\n'); "
+            "const answerLinks = n => answerBlocks(n).flatMap(b => [...b.querySelectorAll('a[href]')]); "
             "const buttons = [...document.querySelectorAll('button')]; "
             "const yuanbaoAnswers = [...document.querySelectorAll('.agent-chat__bubble--ai')]; "
             "const latestYuanbaoAnswer = yuanbaoAnswers.at(-1); "
             "const yuanbaoStillGenerating = location.hostname === 'yuanbao.tencent.com' && "
             "Boolean(latestYuanbaoAnswer) && "
             "!latestYuanbaoAnswer.querySelector('[aria-label=重新生成]'); "
-            "return {answers:nodes.map(n => (n.innerText || '').trim()).filter(Boolean),"
-            "answer_entries:nodes.map(n => ({text:(n.innerText || '').trim(),links:"
-            "[...n.querySelectorAll('a[href]')].map(a => ({url:a.href,title:"
+            "return {answers:nodes.map(answerText).filter(Boolean),"
+            "answer_entries:nodes.map(n => ({text:answerText(n),links:"
+            "answerLinks(n).map(a => ({url:a.href,title:"
             "(a.innerText || a.textContent || '').trim() || null}))})).filter(entry => entry.text),"
-            "answer_links:nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => "
+            "answer_links:nodes.flatMap(n => answerLinks(n).map(a => "
             "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
-            "links:[...new Set(nodes.flatMap(n => [...n.querySelectorAll('a[href]')].map(a => a.href)))],"
+            "links:[...new Set(nodes.flatMap(n => answerLinks(n).map(a => a.href)))],"
             "generating:yuanbaoStillGenerating || buttons.some(b => "
             "/停止生成|Stop generating|Stop responding/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
@@ -1470,20 +1482,32 @@ class BskCliClient:
             expected_count = max(expected_count, int(panel_page.get("expected_count") or 0))
             stable_cards = list(panel_page.get("cards", []))
         else:
-            for _ in range(4):
+            for _ in range(8):
                 panel_page = await self._source_panel_page(session_id, platform)
                 panel_found = panel_found or bool(panel_page.get("panel_found"))
                 expected_count = max(expected_count, int(panel_page.get("expected_count") or 0))
                 cards = list(panel_page.get("cards", [])) if isinstance(panel_page, dict) else []
-                if previous_cards is not None and cards == previous_cards:
-                    stable_cards = cards
-                    break
+                valid_count = sum(
+                    self._source_record(
+                        card,
+                        role=SourceRole.SURFACED,
+                        origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                        excluded_domains=excluded_domains,
+                    ) is not None
+                    for card in cards
+                )
+                was_stable = previous_cards is not None and cards == previous_cards
                 previous_cards = cards
                 stable_cards = cards
+                if expected_count and valid_count >= expected_count:
+                    break
+                if not expected_count and panel_found and was_stable:
+                    break
                 await asyncio.sleep(self.poll_interval)
 
         valid_cards = 0
         panel_records: list[SourceRecord] = []
+        rejected_titles: list[str] = []
         for card in stable_cards:
             record = self._source_record(
                 card,
@@ -1495,13 +1519,21 @@ class BskCliClient:
                 candidates.append(record)
                 panel_records.append(record)
                 valid_cards += 1
+            else:
+                rejected_titles.append(str(card.get("title") or "untitled")[:120])
         sources = merge_sources(candidates)
         unique_panel_cards = len(merge_sources(panel_records))
         if not panel_found or (expected_count and valid_cards < expected_count):
-            return sources, SourceCaptureStatus.FAILED, (
-                f"source panel advertised {expected_count} references; collected {valid_cards} valid cards and {unique_panel_cards} distinct URLs"
+            diagnostic = (
+                f"source panel advertised {expected_count} references; collected {valid_cards} valid cards and {unique_panel_cards} distinct URLs from {len(stable_cards)} rendered cards"
                 if expected_count else "source trigger opened but no source panel could be located"
             )
+            if rejected_titles:
+                diagnostic += (
+                    f"; rejected {len(rejected_titles)} malformed, unsafe or excluded URLs"
+                    f" (titles: {', '.join(rejected_titles[:3])})"
+                )
+            return sources, SourceCaptureStatus.FAILED, diagnostic
         status = (
             SourceCaptureStatus.CAPTURED
             if sources
@@ -2054,7 +2086,9 @@ class BrowserSkillAdapter(ProbeAdapter):
                     PLATFORMS[platform].get("default_timeout", self.default_timeout),
                 )
             )
-            max_attempts = 3 if platform == "gemini" else 1
+            max_attempts = 3 if platform == "gemini" else 2 if platform in {
+                "baidu", "yuanbao", "doubao", "deepseek"
+            } else 1
             retryable = {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
             deadline = asyncio.get_running_loop().time() + total_timeout
             for attempt_index in range(max_attempts):
@@ -2085,6 +2119,19 @@ class BrowserSkillAdapter(ProbeAdapter):
                         failure=FailureKind.TIMEOUT,
                         diagnostic="timeout",
                     )
+                except RuntimeError as error:
+                    diagnostic = str(error)
+                    if any(marker in diagnostic.casefold() for marker in (
+                        "err_network_changed",
+                        "session not registered",
+                        "message textbox not found",
+                    )):
+                        output = BrowserProbeOutput(
+                            failure=FailureKind.EXTRACTION_FAILED,
+                            diagnostic=diagnostic,
+                        )
+                    else:
+                        raise
                 finally:
                     if isinstance(self.client, BskCliClient):
                         locale_verified = self.client._locale_verified.pop(session_id, None)
