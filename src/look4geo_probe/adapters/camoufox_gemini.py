@@ -31,7 +31,8 @@ from ..validity import answer_is_valid_measurement
 GEMINI_URL = "https://gemini.google.com/app"
 COMPOSER_SELECTOR = (
     'div[aria-label="Enter a prompt for Gemini"], '
-    'rich-textarea [contenteditable="true"][role="textbox"]'
+    'rich-textarea [contenteditable="true"][role="textbox"], '
+    'textarea[placeholder="Ask Gemini"]'
 )
 SEND_SELECTOR = 'button[aria-label*="Send"], button[aria-label*="发送"]'
 STOP_SELECTOR = 'button[aria-label*="Stop"], button[aria-label*="停止"]'
@@ -254,6 +255,12 @@ class GeminiPageDriver:
             ),
         }
 
+    async def _composer_text(self, composer) -> str:
+        try:
+            return await composer.input_value()
+        except Exception:
+            return await composer.inner_text()
+
     async def _fill_prompt(self, prompt: str) -> bool:
         for _ in range(2):
             composer = self.page.locator(COMPOSER_SELECTOR).last
@@ -265,7 +272,7 @@ class GeminiPageDriver:
                     await composer.fill(prompt)
                 except Exception:
                     continue
-            current = await composer.inner_text()
+            current = await self._composer_text(composer)
             if current.strip() == prompt:
                 return True
         return False
@@ -280,7 +287,7 @@ class GeminiPageDriver:
                 return False
             await asyncio.sleep(self.poll_interval)
 
-    async def _ensure_flash_mode(self, timeout: float = 15.0) -> bool:
+    async def _ensure_flash_mode(self, timeout: float = 90.0) -> bool:
         picker = self.page.locator(MODE_PICKER_SELECTOR).last
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -336,7 +343,7 @@ class GeminiPageDriver:
     async def _send(self, prompt: str) -> bool:
         for _ in range(3):
             composer = self.page.locator(COMPOSER_SELECTOR).last
-            current = (await composer.inner_text()).strip()
+            current = (await self._composer_text(composer)).strip()
             if current != prompt and not await self._fill_prompt(prompt):
                 continue
             before_url = self.page.url
@@ -399,10 +406,14 @@ class GeminiPageDriver:
         if blocked is not None:
             return blocked
         if not await self._wait_for_composer():
+            blocked = await self._blocking_result()
+            if blocked is not None:
+                return blocked
             return GeminiBrowserResult(
-                status=JobStatus.WAITING_FOR_LOGIN,
-                failure=FailureKind.LOGIN_REQUIRED,
-                diagnostic="Gemini composer is unavailable",
+                status=JobStatus.FAILED,
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="Gemini composer is unavailable; page readiness or layout could not be confirmed",
+                artifact_paths=await self._capture_diagnostics(artifact_dir, "composer-unavailable"),
             )
         if not await self._ensure_flash_mode():
             return GeminiBrowserResult(

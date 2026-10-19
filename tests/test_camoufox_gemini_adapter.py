@@ -312,6 +312,39 @@ class FakePage:
 
 
 @pytest.mark.asyncio
+async def test_missing_composer_without_login_wall_is_extraction_failure(tmp_path):
+    page = FakePage(has_composer=False, body="plus\nmic")
+    driver = GeminiPageDriver(page)
+    async def unavailable():
+        return False
+    driver._wait_for_composer = unavailable
+    result = await driver._probe("diagnostic question", tmp_path)
+    assert result.status == JobStatus.FAILED
+    assert result.failure == FailureKind.EXTRACTION_FAILED
+    assert result.artifact_paths
+
+
+@pytest.mark.asyncio
+async def test_native_textarea_prompt_is_verified_from_value():
+    class Textarea:
+        last = property(lambda self: self)
+        value = ""
+        async def fill(self, value):
+            self.value = value
+        async def press_sequentially(self, value, **kwargs):
+            self.value += value
+        async def inner_text(self):
+            return ""
+        async def input_value(self):
+            return self.value
+    textarea = Textarea()
+    class Page:
+        def locator(self, selector):
+            return textarea
+    assert await GeminiPageDriver(Page())._fill_prompt("runtime check")
+
+
+@pytest.mark.asyncio
 async def test_page_driver_login_succeeds_only_when_composer_is_visible(tmp_path):
     success = await GeminiPageDriver(FakePage()).login()
     blocked = await GeminiPageDriver(
