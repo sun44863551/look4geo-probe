@@ -10,7 +10,7 @@ class InvalidTransition(ValueError):
 
 ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.QUEUED: {JobStatus.ROUTING, JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
-    JobStatus.ROUTING: {JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
+    JobStatus.ROUTING: {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
     JobStatus.RUNNING: {
         JobStatus.WAITING_FOR_LOGIN,
         JobStatus.PARTIAL,

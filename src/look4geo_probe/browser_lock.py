@@ -17,13 +17,18 @@ class BrowserOperationLock:
     async def __aenter__(self) -> "BrowserOperationLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8")
-        while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._handle = handle
-                return self
-            except BlockingIOError:
-                await asyncio.sleep(self.poll_interval)
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._handle = handle
+                    return self
+                except BlockingIOError:
+                    await asyncio.sleep(self.poll_interval)
+        except BaseException:
+            # Cancellation while waiting must not leak the unopened lock owner.
+            handle.close()
+            raise
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         if self._handle is None:

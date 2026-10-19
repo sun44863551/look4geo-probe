@@ -79,8 +79,8 @@ async def test_run_returns_job_before_adapter_completes(tmp_path: Path):
         FixedRouter(["chatgpt"]), store, {"chatgpt": ControlledAdapter("chatgpt", gate)}
     )
     submission = await service.run(ProbeRequest(prompt="hello"))
-    assert submission["status"] == JobStatus.RUNNING
-    assert service.status(submission["job_id"]).status == JobStatus.RUNNING
+    assert submission["status"] == JobStatus.QUEUED
+    assert service.status(submission["job_id"]).status == JobStatus.QUEUED
     gate.set()
     await service.wait(submission["job_id"])
     assert service.result(submission["job_id"]).status == JobStatus.SUCCEEDED
@@ -142,6 +142,71 @@ async def test_platforms_sharing_browser_runtime_run_serially(tmp_path: Path):
     await service.wait(submission["job_id"])
 
     assert adapter.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_jobs_and_service_instances_wait_in_queue(tmp_path):
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    gate = asyncio.Event()
+    adapter = ControlledAdapter("baidu", gate)
+    first = ProbeService(FixedRouter(["baidu"]), store, {"baidu": adapter})
+    second = ProbeService(FixedRouter(["baidu"]), store, {"baidu": adapter})
+    one = await first.run(ProbeRequest(prompt="first"))
+    await asyncio.sleep(0.02)
+    two = await second.run(ProbeRequest(prompt="second"))
+    await asyncio.sleep(0.02)
+    assert first.status(one["job_id"]).status == JobStatus.RUNNING
+    assert second.status(two["job_id"]).status == JobStatus.QUEUED
+    gate.set()
+    await asyncio.gather(first.wait(one["job_id"]), second.wait(two["job_id"]))
+    assert second.result(two["job_id"]).status == JobStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_unexpected_adapter_error_does_not_leave_job_running(tmp_path):
+    class BrokenAdapter(ControlledAdapter):
+        async def run(self, *args):
+            raise RuntimeError("adapter crashed")
+
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(FixedRouter(["baidu"]), store, {"baidu": BrokenAdapter("baidu")})
+    job = await service.run(ProbeRequest(prompt="crash"))
+    await service.wait(job["job_id"])
+    assert service.status(job["job_id"]).status == JobStatus.FAILED
+    assert "adapter crashed" in service.result(job["job_id"]).diagnostic
+
+
+@pytest.mark.asyncio
+async def test_health_error_does_not_leave_job_routing(tmp_path):
+    class BrokenHealth(ControlledAdapter):
+        async def health(self, *args):
+            raise RuntimeError("health crashed")
+
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(FixedRouter(["baidu"]), store, {"baidu": BrokenHealth("baidu")})
+    job = await service.run(ProbeRequest(prompt="health crash"))
+    assert service.status(job["job_id"]).status == JobStatus.FAILED
+    assert "health crashed" in service.result(job["job_id"]).diagnostic
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queued_job_does_not_interrupt_current_job(tmp_path):
+    gate = asyncio.Event()
+    store = ProbeStore(tmp_path / "db.sqlite3", tmp_path / "runs")
+    service = ProbeService(FixedRouter(["baidu"]), store, {"baidu": ControlledAdapter("baidu", gate)})
+    first = await service.run(ProbeRequest(prompt="first"))
+    await asyncio.sleep(0.02)
+    second = await service.run(ProbeRequest(prompt="queued"))
+    await asyncio.sleep(0.02)
+    task = service._tasks[second["job_id"]]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "while queued" in service.result(second["job_id"]).diagnostic
+    assert service.status(first["job_id"]).status == JobStatus.RUNNING
+    gate.set()
+    await service.wait(first["job_id"])
+    assert service.result(first["job_id"]).status == JobStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio

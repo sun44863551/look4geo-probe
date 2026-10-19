@@ -49,6 +49,14 @@ def test_recover_orphaned_running_job_preserves_artifacts(tmp_path):
     assert "interrupted" in (result.diagnostic or "")
 
 
+def test_recover_orphaned_queued_job_preserves_buyer_baseline(tmp_path):
+    store = make_store(tmp_path)
+    job = store.create_job(ProbeRequest(prompt="queued", buyer_baseline="japan"))
+    assert store.get_job(job.job_id).status == JobStatus.QUEUED
+    assert job.job_id in store.recover_orphans()
+    assert store.get_result(job.job_id).buyer_baseline == "japan"
+
+
 def test_request_round_trip_preserves_mode_and_platforms(tmp_path):
     store = make_store(tmp_path)
     original = ProbeRequest(prompt="question", mode="manual", platforms=["baidu"])

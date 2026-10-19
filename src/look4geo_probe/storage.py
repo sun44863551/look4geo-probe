@@ -104,10 +104,12 @@ class ProbeStore:
         return self.get_job(job_id)
 
     def recover_orphans(self) -> list[str]:
-        active = (JobStatus.ROUTING.value, JobStatus.RUNNING.value)
+        # Explicit offline recovery only: callers must first establish that no
+        # worker owns these jobs. Never invoke this when another service runs.
+        active = (JobStatus.QUEUED.value, JobStatus.ROUTING.value, JobStatus.RUNNING.value)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT job_id FROM jobs WHERE status IN (?, ?)", active
+                "SELECT job_id FROM jobs WHERE status IN (?, ?, ?)", active
             ).fetchall()
         recovered = [row["job_id"] for row in rows]
         for job_id in recovered:
@@ -121,6 +123,8 @@ class ProbeStore:
                 result = ProbeResult(
                     job_id=job_id,
                     prompt=job.request.prompt,
+                    buyer_baseline=job.request.buyer_baseline,
+                    buyer_locale=job.request.buyer_baseline.locale,
                     status=JobStatus.FAILED,
                     diagnostic=diagnostic,
                 )

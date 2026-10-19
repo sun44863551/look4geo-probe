@@ -5,6 +5,16 @@ description: Use when measuring GEO visibility or comparing answers, citations, 
 
 # Look4GEO Probe
 
+## Browser sampling concurrency (mandatory)
+
+- BrowserSkill probe sampling is serial across all platforms sharing this local runtime. RedFox/API `workers=12` guidance does NOT apply to probe.
+- Use `d7_collector_v2.py --workers 1` only. Never launch parallel probe CLI subprocesses, parallel browser subagents, duplicate batch runners, or an additional batch while one is running.
+- For MCP, send multiple platforms/repeats in one `probe_run`; `queued` means waiting, not failure. Poll that job instead of resubmitting it. For multiple questions, wait for each job's terminal result before submitting the next.
+- Queue waiting is separate from browser timeout. Do not kill queued jobs just because they have not produced a sample yet; do not restart a live collector to improve throughput.
+- Only reuse successful, nonempty checkpoints with successful source capture. A `runner_error` file is not a completed sample, regardless of file size.
+- Bind the explicitly configured dedicated browser. Never choose the first connected browser or rewrite `config/local.env` automatically. Current user-approved instance is `7cf212dd`; if disconnected, ask the user to reconnect it.
+- Long batches can be terminated by WorkBuddy background-task cleanup. Keep checkpoints, report interruption accurately, and resume serially; `nohup` is not proof a task survives host cleanup.
+
 买家语言基线：日本买家传 `--buyer-baseline japan`，韩国买家传 `korea`；没有明确要求则默认 `english`，不要仅凭问题语种推断。MCP 使用 `buyer_baseline`。保留原问题，每条批量请求均传参数，检查点区分基线。当前仅 ChatGPT BrowserSkill 校验语言；仅 `locale_verified=true` 为已验证，null 不得当作成功基线。语言不代表地理位置。
 
 Use this repository's private local CLI for real-product GEO measurements:

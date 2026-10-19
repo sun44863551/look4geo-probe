@@ -20,6 +20,12 @@ class ProbeMcpTools:
         timeout: float | None = None,
         buyer_baseline: str = "english",
     ) -> dict:
+        """Submit one job to the serial browser queue; poll status until terminal.
+
+        Do not fan out browser jobs with parallel tool calls. Multiple platforms
+        and repeats belong in one request. A queued job has not started sampling;
+        do not resubmit it or treat queue wait as a platform failure.
+        """
         if timeout is not None and not 1 <= timeout <= 1800:
             raise ValueError("timeout must be between 1 and 1800 seconds")
         options = {}
