@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "look4geo-probe": {
+      "command": "/ABSOLUTE/PATH/TO/Look4GEO-Probe/.venv/bin/python",
+      "args": ["-m", "look4geo_probe.mcp_server"],
+      "env": {
+        "LOOK4GEO_BROWSER_ID": "81483588",
+        "LOOK4GEO_LOCKED_BROWSER_ID": "81483588",
+        "LOOK4GEO_CHATGPT_BROWSER_ID": "81483588",
+        "LOOK4GEO_GEMINI_BROWSER_ID": "81483588",
+        "LOOK4GEO_RUNTIME": "workbuddy",
+        "LOOK4GEO_CAMOUFOX_ENABLED": "0",
+        "LOOK4GEO_GEMINI_CAMOUFOX_ONLY": "0",
+        "PATH": "/ABSOLUTE/PATH/TO/BSK-BIN:/ABSOLUTE/PATH/TO/NODE-BIN:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

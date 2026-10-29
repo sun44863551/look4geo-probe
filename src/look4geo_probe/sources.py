@@ -3,6 +3,7 @@ from __future__ import annotations
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .models import Citation, SourceEvidenceOrigin, SourceRecord, SourceRole
+from .source_classification import SourceKind, classify_source_url
 
 TRACKING_PARAMETERS = {"gclid", "fbclid"}
 UNICODE_HYPHENS = str.maketrans({character: "-" for character in "‐‑‒–—―"})
@@ -118,4 +119,22 @@ def citations_from_sources(records: list[SourceRecord]) -> list[Citation]:
         Citation(url=record.url, label=record.title)
         for record in records
         if record.source_role == SourceRole.CITED
+        and classify_source_url(record.url) == SourceKind.WEBSITE
     ]
+
+
+def summarize_sources(records: list[SourceRecord]) -> dict[str, int]:
+    """Count available evidence, retaining surfaced websites separately from cited."""
+    counts = dict(total=0, website_cited=0, website_surfaced=0,
+                  shopping_entries=0, search_entries=0, hosted_unresolved=0)
+    fields = {SourceKind.SHOPPING_ENTRY: "shopping_entries",
+              SourceKind.SEARCH_ENTRY: "search_entries",
+              SourceKind.HOSTED_UNRESOLVED: "hosted_unresolved"}
+    for source in merge_sources(records):
+        kind = classify_source_url(source.url)
+        key = fields.get(kind)
+        if key is None:
+            key = "website_cited" if source.source_role == SourceRole.CITED else "website_surfaced"
+        counts[key] += 1
+        counts["total"] += 1
+    return counts

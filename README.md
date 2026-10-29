@@ -145,6 +145,34 @@ Typical MCP operations include:
 
 The probe records browser-observable evidence only. A source may be classified as `cited` when linked from the answer or `surfaced` when shown in the platform's visible source panel without being linked from the answer body.
 
+Schema 4 separates link purpose (`source_kind`) from evidence location. Google
+shopping/search entries and opaque Google-hosted links remain in `sources` as
+`surfaced`, but are excluded from `citations`. Publisher documentation such as
+`developers.google.com` is not excluded. `website` describes a link type, not
+publisher credibility or independently verified citation intent.
+
+Each attempt exposes `source_statistics`: `total`, `website_cited`,
+`website_surfaced`, `shopping_entries`, `search_entries`, and
+`hosted_unresolved`. Counts describe saved evidence; when no evidence was
+captured, statistics are `null`, not a measured absence. Failed or partial
+captures must still be distinguished using status and source-capture fields.
+Report publisher visibility from both website categories, while keeping the
+cited/surfaced distinction. Do not use `len(citations)` as total source coverage.
+
+Recount existing batch records without new web requests or overwriting inputs:
+
+```bash
+./scripts/probe-local source-report /absolute/path/to/raw \
+  --platform gemini --output /absolute/path/to/new-source-report.json
+```
+
+The output file must not already exist and its parent directory must exist.
+The report includes all links, separate counts, publisher-host statistics,
+per-question coverage, and hashes of the original input files. Saved schemas
+1–3 remain readable; historical files and reports are not rewritten implicitly.
+Existing custom report scripts must adopt the separate categories rather than
+filtering all source evidence to `source_role == "cited"`.
+
 The following states remain distinct:
 
 - successful answer with visible sources;

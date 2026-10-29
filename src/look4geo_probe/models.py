@@ -6,7 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCHEMA_VERSION = 3
+from .source_classification import SourceKind, classify_source_url
+
+SCHEMA_VERSION = 4
 
 
 class BuyerBaseline(StrEnum):
@@ -131,6 +133,15 @@ class SourceRecord(StrictModel):
     source_role: SourceRole
     evidence_origin: SourceEvidenceOrigin
     linked_in_answer: bool
+    source_kind: SourceKind = SourceKind.WEBSITE
+
+    @model_validator(mode="after")
+    def classify_link_purpose(self) -> "SourceRecord":
+        self.source_kind = classify_source_url(self.url)
+        if self.source_kind != SourceKind.WEBSITE:
+            # Preserve the link and its origin, but never call navigation a citation.
+            self.source_role = SourceRole.SURFACED
+        return self
 
 
 class PlatformAttempt(StrictModel):
@@ -158,6 +169,20 @@ class PlatformAttempt(StrictModel):
     artifact_paths: list[str] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
+    source_statistics: dict[str, int] | None = None
+
+    @model_validator(mode="after")
+    def separate_navigation_from_citations(self) -> "PlatformAttempt":
+        from .sources import summarize_sources
+
+        self.citations = [c for c in self.citations if classify_source_url(c.url) == SourceKind.WEBSITE]
+        # Recompute rather than trust cached counts in caller-provided JSON.
+        self.source_statistics = (
+            summarize_sources(self.sources)
+            if self.sources or self.source_capture_status == SourceCaptureStatus.CAPTURED
+            else None
+        )
+        return self
 
 
 class ProbeResult(StrictModel):

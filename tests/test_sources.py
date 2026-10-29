@@ -111,6 +111,7 @@ def test_merge_sources_deduplicates_in_first_seen_order_and_promotes_cited_evide
         "source_role": "cited",
         "evidence_origin": "answer_dom",
         "linked_in_answer": True,
+        "source_kind": "website",
     }
 
 

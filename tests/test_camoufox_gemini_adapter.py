@@ -731,6 +731,20 @@ async def test_extracts_only_newest_gemini_answer():
 
 
 @pytest.mark.asyncio
+async def test_google_documentation_sources_survive_platform_navigation_filter():
+    page = ExtractionPage(["answer"], cited=[
+        {"url": "https://developers.google.com/search/docs/crawling-indexing/robots/intro", "title": "Robots guide"},
+        {"url": "https://support.google.com/webmasters/answer/7451001", "title": "Search help"},
+        {"url": "https://accounts.google.com/", "title": "Account"},
+        {"url": "https://www.google.com/", "title": "Navigation"},
+        {"url": "https://gemini.google.com/app", "title": "Chat"},
+    ])
+    assert [s.domain for s in await extract_gemini_sources(page)] == [
+        "developers.google.com", "support.google.com",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_extracts_normalizes_and_merges_gemini_sources():
     page = ExtractionPage(
         ["answer"],

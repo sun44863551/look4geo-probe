@@ -72,3 +72,31 @@ See https://www.perplexity.ai/help-center/en/articles/11187416-which-perplexity-
 
 Browser credentials remain in the respective local browser profiles. Probe jobs and
 results remain in the local SQLite database under `data/`.
+
+## Source statistics repair (schema 4, 2026-10-29)
+
+Use the current local CLI or reconnect persistent MCP clients to load the update.
+`source_kind` separates `website`, `shopping_entry`, `search_entry`, and
+`hosted_unresolved`. Shopping/search/opaque hosted links remain saved but are no
+longer called citations. A surfaced website remains surfaced, never silently
+promoted to a citation. The raw website link is not automatically proof of an
+independently verified content citation.
+
+For total publisher visibility use both `website_cited` and `website_surfaced`
+from `source_statistics`, and display their counts separately. Never use only
+the citations array or a cited-only export to describe all exposed sources.
+`source_statistics=null` is unknown/no saved exposed evidence, not a measured
+zero. Check capture failures and answer failures separately.
+
+To recount a saved batch without sending questions:
+
+```sh
+/ABSOLUTE/PATH/TO/look4geo-probe/scripts/probe-local source-report \
+  /ABSOLUTE/PATH/TO/customer/probe/raw --platform gemini \
+  --output /ABSOLUTE/PATH/TO/new-source-report.json
+```
+
+This command refuses to overwrite an existing report and leaves raw records
+untouched. Legacy customer analysis scripts and previously generated documents
+are not automatically updated: use this new report rather than interpreting
+the old Google-heavy citation table as publisher distribution.

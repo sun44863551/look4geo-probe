@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json as jsonlib
+from pathlib import Path
 from collections.abc import Callable
 
 import typer
@@ -12,6 +13,29 @@ from .runtime import build_service
 
 app = typer.Typer(no_args_is_help=True)
 _service_factory: Callable = build_service
+
+
+@app.command("source-report")
+def source_report(
+    raw_directory: Path = typer.Argument(..., exists=True, file_okay=False),
+    output: Path = typer.Option(..., "--output"),
+    platform: str = typer.Option("gemini", "--platform"),
+) -> None:
+    """Recount saved source evidence without web requests or overwriting files."""
+    from .source_reporting import build_source_report
+
+    if output.exists():
+        raise typer.BadParameter("Output already exists; choose a new report path")
+    try:
+        report = build_source_report(raw_directory, platform)
+        # Exclusive creation also protects against a concurrent writer.
+        with output.open("x", encoding="utf-8") as handle:
+            jsonlib.dump(report, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+    except (ValueError, OSError) as error:
+        raise typer.BadParameter(str(error)) from error
+    _print({"output": str(output.resolve()), "question_count": report["question_count"],
+            "source_statistics": report["source_statistics"]}, True)
 
 
 def set_service_factory(factory: Callable) -> None:

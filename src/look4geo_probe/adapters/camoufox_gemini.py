@@ -74,7 +74,10 @@ CITATION_TRIGGER_SELECTOR = (
 CITATION_DIALOG_LINK_SELECTOR = (
     '[role="dialog"] a[href], .mat-mdc-dialog-container a[href]'
 )
-EXCLUDED_SOURCE_DOMAINS = frozenset({"gemini.google.com", "google.com"})
+EXCLUDED_SOURCE_DOMAINS = frozenset({
+    "gemini.google.com", "accounts.google.com", "myaccount.google.com",
+    "ogs.google.com", "www.google.com",
+})
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,8 @@ def _source_records(
             url, excluded_domains=EXCLUDED_SOURCE_DOMAINS
         )
         if normalized is None:
+            continue
+        if urlsplit(normalized).hostname == "google.com":
             continue
         records.append(
             SourceRecord(

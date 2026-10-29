@@ -34,7 +34,7 @@ def test_manual_mode_deduplicates_platforms_preserving_order():
 
 def test_new_results_use_schema_version_three():
     result = ProbeResult(job_id="job-1", prompt="test", status="succeeded")
-    assert result.schema_version == 3
+    assert result.schema_version == 4
 
 
 def test_source_record_serializes_browser_visible_evidence():
@@ -56,6 +56,7 @@ def test_source_record_serializes_browser_visible_evidence():
         "source_role": "cited",
         "evidence_origin": "answer_dom",
         "linked_in_answer": True,
+        "source_kind": "website",
     }
 
 

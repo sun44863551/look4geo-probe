@@ -63,6 +63,40 @@ def test_perplexity_selects_longest_answer_not_follow_up():
     assert answer == "This is the complete researched answer with suppliers and evidence."
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["停止响应（Esc）", "Stop response", "Stop responding"])
+async def test_answer_page_recognizes_live_perplexity_stop_labels(label):
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required to exercise browser JavaScript")
+    class DomClient(BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            harness = (
+                "global.location={hostname:'www.perplexity.ai'};"
+                "global.document={body:{innerText:''},querySelectorAll:s=>s==='button'?"
+                "[{innerText:'',getAttribute:k=>k==='aria-label'?process.argv[2]:null}]:[]};"
+                "process.stdout.write(JSON.stringify(eval(process.argv[1])));"
+            )
+            result = subprocess.run(["node", "-e", harness, args[1], label], capture_output=True, text=True, check=True)
+            return {"value": json.loads(result.stdout)}
+    page = await DomClient("81483588")._answer_page("session", PLATFORMS["perplexity"]["answer_selector"])
+    assert page["generating"] is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_waits_for_flash_picker_after_initial_loading_screen():
+    class LoadingClient(BskCliClient):
+        def __init__(self):
+            super().__init__("81483588", poll_interval=0)
+            self.reads = 0
+        async def _run_json(self, *args, **kwargs):
+            assert args[0] == "observe"
+            self.reads += 1
+            return {"text": "Loading" if self.reads == 1 else '@e1 button "Open mode picker, currently Flash"'}
+    client = LoadingClient()
+    assert await client._ensure_gemini_flash("session") is True
+    assert client.reads == 2
+
+
 def test_grok_limit_reset_wall_is_rate_limited():
     assert page_is_rate_limited(
         {"page_text": "距离限制重置还剩 1小时 13分钟。等待或升级至 SuperGrok。"}
@@ -299,8 +333,10 @@ class GeminiNativeInputClient(BskCliClient):
 
     async def _run_json(self, *args, timeout=30.0):
         self.calls.append(args)
-        if args[0] == "fill" or args[0] == "evaluate":
-            raise AssertionError("Gemini input must use native keyboard events")
+        if args[0] == "evaluate":
+            raise AssertionError("Gemini input must use native browser input")
+        if args[0] == "fill":
+            self.value = args[args.index("--value") + 1]
         if args[0] == "press":
             key = args[1]
             if key == "Backspace":
@@ -1266,23 +1302,23 @@ async def test_chatgpt_rejects_unverified_fill_instead_of_native_insert_fallback
 
 
 @pytest.mark.asyncio
-async def test_gemini_prompt_entry_uses_only_native_keyboard_events():
+async def test_gemini_prompt_entry_batches_native_input_and_verifies_text():
     client = GeminiNativeInputClient()
 
     await client._enter_prompt("session", "gemini", "@e58", "Hi A")
 
     assert client.value == "Hi A"
-    assert [call[:2] for call in client.calls] == [
-        ("click", "@e58"),
-        ("press", "Meta+A"),
-        ("press", "Backspace"),
-        ("press", "H"),
-        ("press", "i"),
-        ("press", "Space"),
-        ("press", "A"),
-    ]
-    assert all("@e58" in call for call in client.calls)
-    assert all("--selector" not in call for call in client.calls)
+    assert len(client.calls) <= 2
+    assert client.calls[-1][0] == "fill"
+    assert "--selector" in client.calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_gemini_first_submission_is_native_enter():
+    client = GeminiObservedSubmitClient()
+    await client._submit_prompt("session", "gemini", "@e47")
+    actions = [call for call in client.calls if call[0] in {"click", "press"}]
+    assert actions[0][:2] == ("press", "Enter")
 
 
 @pytest.mark.asyncio
@@ -1342,7 +1378,7 @@ async def test_chatgpt_reports_send_failure_without_waiting_for_answer_timeout()
 
 @pytest.mark.asyncio
 async def test_gemini_submits_using_native_send_button():
-    client = FillFallbackClient()
+    client = GeminiSubmitClient([{"submitted": False}] * 10 + [{"submitted": True}])
     await client._submit_prompt("session", "gemini", "@e47")
     click = next(call for call in client.calls if call[0] == "click")
     assert click[:2] == (
@@ -1354,7 +1390,7 @@ async def test_gemini_submits_using_native_send_button():
 
 
 @pytest.mark.asyncio
-async def test_gemini_successful_native_click_does_not_duplicate_submission():
+async def test_gemini_successful_native_enter_does_not_duplicate_submission():
     client = GeminiSubmitClient(
         [
             {"submitted": False},
@@ -1368,7 +1404,7 @@ async def test_gemini_successful_native_click_does_not_duplicate_submission():
 
     await client._submit_prompt("session", "gemini", "@e47")
 
-    assert client.clicks == 1
+    assert client.clicks == 0
     assert client.evaluations == 6
 
 
@@ -1378,7 +1414,7 @@ async def test_gemini_visible_conversation_confirms_submission_when_dom_lags():
 
     await client._submit_prompt("session", "gemini", "@e47")
 
-    assert client.clicks == 1
+    assert client.clicks == 0
 
 
 @pytest.mark.asyncio
@@ -1390,9 +1426,9 @@ async def test_gemini_click_success_is_not_submission_until_page_state_changes()
     with pytest.raises(RuntimeError, match="submission state did not change"):
         await client._submit_prompt("session", "gemini", "@e47")
 
-    assert client.clicks == 1
+    assert client.clicks == 2
     assert client.evaluations == 30
-    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 2
+    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1409,12 +1445,29 @@ async def test_gemini_submission_check_uses_visible_composer():
 
 @pytest.mark.asyncio
 async def test_gemini_refreshes_send_button_ref_before_clicking():
-    client = GeminiObservedSubmitClient()
+    class LaggedSendClient(GeminiObservedSubmitClient):
+        def __init__(self):
+            super().__init__()
+            self.checks = 0
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "evaluate":
+                self.calls.append(args)
+                self.checks += 1
+                return {"value": {"submitted": self.checks > 10}}
+            return await super()._run_json(*args, **kwargs)
+    client = LaggedSendClient()
 
     await client._submit_prompt("session", "gemini", "@e47")
 
     click = next(call for call in client.calls if call[0] == "click")
     assert click[:2] == ("click", "@e52")
+
+
+@pytest.mark.asyncio
+async def test_gemini_silent_bulk_fill_cannot_pass_prompt_verification():
+    client = GeminiSilentFillClient()
+    with pytest.raises(RuntimeError, match="prompt entry could not be verified"):
+        await client._enter_prompt("session", "gemini", None, "original question")
 
 
 @pytest.mark.asyncio

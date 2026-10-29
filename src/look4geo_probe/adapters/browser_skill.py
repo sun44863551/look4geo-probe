@@ -733,11 +733,7 @@ class BskCliClient:
                         source_diagnostic = str(error)
                     return BrowserProbeOutput(
                         answer=current_text,
-                        citations=[
-                            source.url
-                            for source in sources
-                            if source.source_role == SourceRole.CITED
-                        ],
+                        citations=[citation.url for citation in citations_from_sources(sources)],
                         sources=sources,
                         source_capture_status=source_status,
                         source_capture_diagnostic=source_diagnostic,
@@ -825,29 +821,10 @@ class BskCliClient:
             raise RuntimeError("Doubao prompt entry could not be verified after 3 attempts")
         if platform == "gemini":
             selector = PLATFORMS[platform]["composer_selector"]
-            target = ("--ref", textbox_ref) if textbox_ref else ("--selector", selector)
             await self._run_json(
-                "click", textbox_ref or selector, "--session", session_id,
-                timeout=timeout,
-            )
-            await self._run_json(
-                "press", "Meta+A", *target,
+                "fill", "--selector", selector, "--value", prompt,
                 "--session", session_id, timeout=timeout,
             )
-            await self._run_json(
-                "press", "Backspace", *target,
-                "--session", session_id, timeout=timeout,
-            )
-            for character in prompt:
-                key = (
-                    "Space" if character == " "
-                    else "Shift+Enter" if character == "\n"
-                    else character
-                )
-                await self._run_json(
-                    "press", key, *target,
-                    "--session", session_id, timeout=timeout,
-                )
             if (await self._composer_text(session_id, selector)).strip() != prompt.strip():
                 raise RuntimeError("Gemini native prompt entry could not be verified")
             return
@@ -1060,6 +1037,12 @@ class BskCliClient:
                 try:
                     if attempt == 0:
                         await self._run_json(
+                            "press", "Enter", "--selector",
+                            PLATFORMS[platform]["composer_selector"],
+                            "--session", session_id, timeout=timeout,
+                        )
+                    else:
+                        await self._run_json(
                             "click",
                             send_ref
                             or (
@@ -1068,16 +1051,6 @@ class BskCliClient:
                                 'button[aria-label="Send prompt"], button[aria-label*="Send" i]'
                             ),
                             "--session", session_id, timeout=timeout
-                        )
-                    else:
-                        await self._run_json(
-                            "press",
-                            "Enter",
-                            "--selector",
-                            PLATFORMS[platform]["composer_selector"],
-                            "--session",
-                            session_id,
-                            timeout=timeout,
                         )
                 except RuntimeError:
                     await self._run_json(
@@ -1264,15 +1237,21 @@ class BskCliClient:
         return False
 
     async def _ensure_gemini_flash(self, session_id: str) -> bool:
-        observation = await self._run_json(
-            "observe", "--session", session_id, timeout=30
-        )
-        page_text = str(observation.get("text", ""))
-        if re.search(r"Open mode picker, currently [^\"\n]*Flash", page_text, re.I):
-            return True
-        picker_ref = self._find_control_ref(
-            page_text, ("Open mode picker, currently",)
-        )
+        picker_ref = None
+        readiness_deadline = asyncio.get_running_loop().time() + 90
+        for _ in range(45):
+            observation = await self._run_json(
+                "observe", "--session", session_id, timeout=30
+            )
+            page_text = str(observation.get("text", ""))
+            if re.search(r"Open mode picker, currently [^\"\n]*Flash", page_text, re.I):
+                return True
+            picker_ref = self._find_control_ref(
+                page_text, ("Open mode picker, currently",)
+            )
+            if picker_ref is not None or asyncio.get_running_loop().time() >= readiness_deadline:
+                break
+            await asyncio.sleep(self.poll_interval)
         if picker_ref is None:
             return False
         await self._run_json("click", picker_ref, "--session", session_id, timeout=30)
@@ -1352,7 +1331,7 @@ class BskCliClient:
             "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
             "links:[...new Set(nodes.flatMap(n => answerLinks(n).map(a => a.href)))],"
             "generating:yuanbaoStillGenerating || buttons.some(b => "
-            "/停止生成|Stop generating|Stop responding/i.test("
+            "/停止生成|停止响应|Stop generating|Stop responding|Stop response/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
             "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit|距离限制重置还剩|upgrade to supergrok/i.test(bodyText),"
             "page_text:bodyText}; })()"

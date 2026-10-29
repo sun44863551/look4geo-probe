@@ -50,7 +50,7 @@ async def test_mcp_run_returns_immediately_without_waiting():
 async def test_mcp_result_is_structured_json_data():
     tools = ProbeMcpTools(FakeService())
     result = await tools.probe_result("job-2")
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
     assert result["status"] == "succeeded"
     attempt = result["attempts"][0]
     assert attempt["status"] == "succeeded"
