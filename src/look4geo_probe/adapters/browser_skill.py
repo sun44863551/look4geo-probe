@@ -706,7 +706,9 @@ class BskCliClient:
                 return BrowserProbeOutput(
                     failure=FailureKind.RATE_LIMITED, diagnostic="platform rate limit detected"
                 )
-            if page.get("generating"):
+            if page.get("generating") or (
+                platform == "chatgpt" and page.get("completion_confirmed") is False
+            ):
                 stable_rounds = 0
             elif current_text == previous:
                 stable_rounds += 1
@@ -731,7 +733,12 @@ class BskCliClient:
                         sources = []
                         source_status = SourceCaptureStatus.FAILED
                         source_diagnostic = str(error)
+                    try:
+                        conversation_url = await self._current_url(session_id)
+                    except Exception:
+                        conversation_url = None
                     return BrowserProbeOutput(
+                        conversation_url=conversation_url,
                         answer=current_text,
                         citations=[citation.url for citation in citations_from_sources(sources)],
                         sources=sources,
@@ -1318,12 +1325,20 @@ class BskCliClient:
             + "; const answerText = n => answerBlocks(n).map(b => (b.innerText || '').trim()).filter(Boolean).join('\\n\\n'); "
             "const answerLinks = n => answerBlocks(n).flatMap(b => [...b.querySelectorAll('a[href]')]); "
             "const buttons = [...document.querySelectorAll('button')]; "
+            # A stable search summary is not a completed ChatGPT turn. The live
+            # web UI exposes completion on the enclosing turn, even while the
+            # stop-button label disappears between research and answer phases.
+            "const latestAnswer = nodes.at(-1); "
+            "const chatgptTurn = location.hostname === 'chatgpt.com' ? "
+            "latestAnswer?.closest('[data-talvt-turn-state]') : null; "
+            "const completionConfirmed = location.hostname === 'chatgpt.com' ? "
+            "chatgptTurn?.getAttribute('data-talvt-turn-state') === 'complete' : null; "
             "const yuanbaoAnswers = [...document.querySelectorAll('.agent-chat__bubble--ai')]; "
             "const latestYuanbaoAnswer = yuanbaoAnswers.at(-1); "
             "const yuanbaoStillGenerating = location.hostname === 'yuanbao.tencent.com' && "
             "Boolean(latestYuanbaoAnswer) && "
             "!latestYuanbaoAnswer.querySelector('[aria-label=重新生成]'); "
-            "return {answers:nodes.map(answerText).filter(Boolean),"
+            "return {completion_confirmed:completionConfirmed,answers:nodes.map(answerText).filter(Boolean),"
             "answer_entries:nodes.map(n => ({text:answerText(n),links:"
             "answerLinks(n).map(a => ({url:a.href,title:"
             "(a.innerText || a.textContent || '').trim() || null}))})).filter(entry => entry.text),"

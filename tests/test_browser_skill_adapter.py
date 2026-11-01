@@ -680,6 +680,49 @@ class DoubaoPostSubmitLoginClient(DelayedAnswerClient):
     pass
 
 
+@pytest.mark.asyncio
+async def test_chatgpt_waits_for_turn_completion_even_when_partial_text_is_stable():
+    partial = "Comparing goji oils"
+    final = "Here is the completed comparison with verified product details."
+    client = DelayedAnswerClient([
+        {"answers": []},
+        *[{"answers": [partial], "completion_confirmed": False} for _ in range(4)],
+        *[{"answers": [final], "completion_confirmed": True} for _ in range(4)],
+    ])
+    result = await client.probe("session", "chatgpt", "Compare face oils", timeout=1)
+    assert result.answer == final
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_long_partial_is_not_completed_without_turn_signal():
+    partial = "This is a lengthy draft while web research is still in progress. " * 12
+    client = DelayedAnswerClient([{"answers": []}, {"answers": [partial], "completion_confirmed": False}])
+    result = await client.probe("session", "chatgpt", "Compare face oils", timeout=0.02)
+    assert result.failure == FailureKind.EXTRACTION_FAILED
+    assert result.answer == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state,expected", [("in_progress", False), ("complete", True)])
+async def test_chatgpt_dom_reads_latest_turn_state_not_old_completed_turn(state, expected):
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required to exercise browser JavaScript")
+    class DomClient(BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            harness = (
+                "global.location={hostname:'chatgpt.com'};"
+                "const node=s=>({innerText:'Comparing oils',querySelectorAll:()=>[],"
+                "closest:sel=>sel==='[data-talvt-turn-state]'?{getAttribute:()=>s}:null});"
+                "const nodes=[node('complete'),node(process.argv[2])];"
+                "global.document={body:{innerText:''},querySelectorAll:s=>s==='button'?[]:s==='.agent-chat__bubble--ai'?[]:nodes};"
+                "process.stdout.write(JSON.stringify(eval(process.argv[1])));"
+            )
+            result = subprocess.run(["node", "-e", harness, args[1], state], capture_output=True, text=True, check=True)
+            return {"value": json.loads(result.stdout)}
+    page = await DomClient("81483588")._answer_page("session", PLATFORMS["chatgpt"]["answer_selector"])
+    assert page.get("completion_confirmed") is expected
+
+
 class SourceCollectorClient(BskCliClient):
     def __init__(self, open_results, panel_pages=()):
         super().__init__("browser", poll_interval=0)
