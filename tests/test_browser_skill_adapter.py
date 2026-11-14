@@ -93,7 +93,7 @@ async def test_gemini_waits_for_flash_picker_after_initial_loading_screen():
             self.reads += 1
             return {"text": "Loading" if self.reads == 1 else '@e1 button "Open mode picker, currently Flash"'}
     client = LoadingClient()
-    assert await client._ensure_gemini_flash("session") is True
+    assert await client._ensure_gemini_mode("session") is True
     assert client.reads == 2
 
 
@@ -261,7 +261,7 @@ def test_navigation_is_not_pinned_before_the_task_tab_is_known():
 
 
 @pytest.mark.asyncio
-async def test_gemini_session_starts_in_foreground_for_real_keyboard_events():
+async def test_gemini_session_does_not_force_foreground_or_double_navigation():
     client = SessionStartClient()
 
     assert await client.start("gemini") == "session-test"
@@ -276,7 +276,7 @@ async def test_non_keyboard_platform_session_remains_backgrounded():
 
     assert await client.start("deepseek") == "session-test"
     assert client.calls == [
-        ("session", "start", "--browser", "browser-test", "--no-focus")
+        ("session", "start", "--browser", "browser-test")
     ]
 
 
@@ -340,8 +340,8 @@ class GeminiNativeInputClient(BskCliClient):
         if args[0] == "press":
             key = args[1]
             if key == "Backspace":
-                self.value = ""
-            elif key == "Space":
+                self.value = self.value[:-1]
+            elif key.casefold() == "space":
                 self.value += " "
             elif key != "Meta+A":
                 self.value += key
@@ -520,6 +520,16 @@ class GeminiSubmitClient(BskCliClient):
         return {"value": True}
 
 
+@pytest.mark.asyncio
+async def test_gemini_stops_after_explicit_platform_error_without_resending():
+    client = GeminiSubmitClient([
+        {"submitted": True, "platform_error": "Something went wrong (1)"},
+    ])
+    with pytest.raises(RuntimeError, match=r"Gemini platform error: Something went wrong \(1\)"):
+        await client._submit_prompt("session", "gemini", None)
+    assert [c[0] for c in client.calls if c[0] in {"press", "click"}] == ["press"]
+
+
 class ChatGPTSubmitClient(BskCliClient):
     def __init__(self, states):
         super().__init__("browser", poll_interval=0)
@@ -565,6 +575,16 @@ async def test_chatgpt_locale_override_uses_real_user_agent_before_navigation():
 
 
 @pytest.mark.asyncio
+async def test_chatgpt_locale_check_waits_for_post_navigation_document():
+    client = ComposerStateClient([
+        {"navigatorLanguage": "en-US", "documentLanguage": "", "documentReady": False},
+        {"navigatorLanguage": "en-US", "documentLanguage": "en", "documentReady": True},
+    ])
+    assert await client._chatgpt_english_locale_ready("session")
+    assert len(client.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_chatgpt_locale_check_rejects_chinese_page():
     client = ChatGPTLocaleClient(document_language="zh-CN")
 
@@ -599,6 +619,45 @@ class GeminiEnterSubmitClient(BskCliClient):
         if args[0] == "evaluate":
             return {"value": {"submitted": True}}
         return {"value": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_query,has_composer", [(False, True), (True, True), (False, False)])
+async def test_gemini_submission_check_executes_real_browser_script(user_query, has_composer):
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required to exercise browser JavaScript")
+
+    class Client(BskCliClient):
+        def __init__(self):
+            super().__init__("81483588", poll_interval=0)
+            self.inputs = []
+
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "observe":
+                return {"text": '@e52 button "Send message"'}
+            if args[0] != "evaluate":
+                self.inputs.append(args[0])
+                return {"ok": True}
+            harness = (
+                "global.location={pathname:'/app'};"
+                "const composer={innerText:'Test question',getClientRects:()=>[{}]};"
+                "global.document={querySelectorAll:s=>s==='button'||process.argv[3]!=='true'?[]:[composer],"
+                "querySelector:s=>s.includes('user-query')&&process.argv[2]==='true'?{}:null};"
+                "process.stdout.write(JSON.stringify(eval(process.argv[1])));"
+            )
+            result = subprocess.run(
+                ["node", "-e", harness, args[1], str(user_query).lower(), str(has_composer).lower()],
+                capture_output=True, text=True, check=True,
+            )
+            return {"value": json.loads(result.stdout)}
+
+    client = Client()
+    if user_query:
+        await client._submit_prompt("session", "gemini", None)
+        assert client.inputs == ["press"]
+    else:
+        with pytest.raises(RuntimeError, match="submission state did not change"):
+            await client._submit_prompt("session", "gemini", None)
 
 
 class GeminiVisibleConversationClient(GeminiSubmitClient):
@@ -656,7 +715,7 @@ class DelayedAnswerClient(BskCliClient):
     async def _ensure_perplexity_standard_search(self, session_id):
         return True
 
-    async def _ensure_gemini_flash(self, session_id):
+    async def _ensure_gemini_mode(self, session_id):
         return True
 
     async def _wait_submission_ready(self, *args, **kwargs):
@@ -676,8 +735,84 @@ class DelayedAnswerClient(BskCliClient):
         return self.last_page
 
 
+@pytest.mark.asyncio
+async def test_gemini_starts_on_configured_google_account_slot(monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_GEMINI_ACCOUNT_SLOT", "1")
+    client = DelayedAnswerClient([])
+    async def check_navigation(*args, **kwargs):
+        assert args[:2] == ("navigate", "https://gemini.google.com/u/1/app")
+        raise RuntimeError("navigation verified")
+    client._run_json = check_navigation
+    with pytest.raises(RuntimeError, match="navigation verified"):
+        await client.probe("session", "gemini", "A test question", timeout=1)
+
+
 class DoubaoPostSubmitLoginClient(DelayedAnswerClient):
     pass
+
+
+@pytest.mark.asyncio
+async def test_gemini_announced_reply_with_no_body_is_explicit_non_retryable_failure():
+    client = DelayedAnswerClient([
+        {"answers": []},
+        {"answers": [], "generating": False, "page_text": "Gemini said\n\nGemini replied"},
+    ])
+    result = await client.probe("session", "gemini", "Short question", timeout=0.03)
+    assert result.failure == FailureKind.EXTRACTION_FAILED
+    assert "announced a reply but no answer appeared before timeout" in result.diagnostic
+    assert not result.retryable
+    assert client.submit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_waits_for_body_after_reply_announcement():
+    body = "Robots.txt tells crawlers which paths they may request."
+    empty = {"answers": [], "generating": False, "page_text": "Gemini replied"}
+    client = DelayedAnswerClient([
+        {"answers": []}, *([empty] * 5), {"answers": [body], "links": []},
+    ])
+    result = await client.probe("session", "gemini", "What is robots.txt?", timeout=0.1)
+    assert result.answer == body
+    assert client.submit_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown", ["", "Robots"])
+async def test_gemini_reads_answer_dom_when_rendered_inner_text_is_incomplete(shown):
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required to exercise browser JavaScript")
+
+    class DomClient(BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            harness = (
+                "global.location={hostname:'gemini.google.com'};"
+                "const txt=value=>({nodeType:3,nodeValue:value});"
+                "const el=(tag,children)=>({nodeType:1,tagName:tag,childNodes:children,"
+                "getAttribute:()=>null,innerText:'',closest:s=>s==='model-response'?{}:null,querySelectorAll:()=>[]});"
+                "const answer=el('DIV',[el('P',[txt('Robots.txt guides '),el('B',[txt('crawlers')]),txt('.')]),"
+                "el('SCRIPT',[txt('ignore me')]),el('P',[txt('A sitemap lists URLs.')])]);"
+                "answer.innerText=process.argv[2];"
+                "global.document={body:{innerText:'Gemini said'},querySelectorAll:s=>s==='message-content .markdown'?[answer]:[]};"
+                "process.stdout.write(JSON.stringify(eval(process.argv[1])));"
+            )
+            result = subprocess.run(["node", "-e", harness, args[1], shown], capture_output=True, text=True, check=True)
+            return {"value": json.loads(result.stdout)}
+
+    page = await DomClient("81483588")._answer_page("session", PLATFORMS["gemini"]["answer_selector"])
+    assert page["answers"] == ["Robots.txt guides crawlers.\n\nA sitemap lists URLs."]
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_account_changed_alert_stops_without_resending():
+    client = DelayedAnswerClient([
+        {"answers": []},
+        {"answers": [], "account_changed": True},
+    ])
+    result = await client.probe("session", "chatgpt", "Compare face oils", timeout=0.02)
+    assert result.failure == FailureKind.SEND_FAILED
+    assert "account changed" in result.diagnostic
+    assert not result.retryable
+    assert client.submit_count == 1
 
 
 @pytest.mark.asyncio
@@ -730,6 +865,10 @@ class SourceCollectorClient(BskCliClient):
         self.panel_pages = iter(panel_pages)
         self.last_panel_page = {"panel_found": True, "cards": []}
         self.open_calls = 0
+
+    async def _collect_chatgpt_popovers(self, session_id, known_urls=frozenset()):
+        # These fixtures exercise the generic source-panel path. No live BSK.
+        return None
 
     async def _open_source_panel(self, session_id, platform):
         self.open_calls += 1
@@ -1334,26 +1473,27 @@ async def test_disabled_send_control_times_out_without_submitting():
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_rejects_unverified_fill_instead_of_native_insert_fallback():
+async def test_chatgpt_rejects_unverified_prefill_without_submitting():
     client = FillFallbackClient()
-    with pytest.raises(RuntimeError, match="ChatGPT prompt entry could not be verified"):
+    with pytest.raises(RuntimeError, match="ChatGPT prompt entry via .* could not be verified"):
         await client._enter_prompt("session", "chatgpt", "@e42", "hello")
     commands = [call[0] for call in client.calls]
-    assert commands.count("click") == 3
+    assert commands.count("navigate") == 3
+    assert "click" not in commands
     assert "fill" not in commands
     assert "press" not in commands
 
 
 @pytest.mark.asyncio
-async def test_gemini_prompt_entry_batches_native_input_and_verifies_text():
+async def test_gemini_prompt_entry_syncs_quill_with_native_input_and_verifies_text():
     client = GeminiNativeInputClient()
 
     await client._enter_prompt("session", "gemini", "@e58", "Hi A")
 
     assert client.value == "Hi A"
-    assert len(client.calls) <= 2
-    assert client.calls[-1][0] == "fill"
-    assert "--selector" in client.calls[-1]
+    assert [call[0] for call in client.calls] == ["click", "fill", "press", "press"]
+    assert "--selector" in client.calls[1]
+    assert [call[1].casefold() for call in client.calls[2:]] == ["space", "backspace"]
 
 
 @pytest.mark.asyncio
@@ -1374,7 +1514,7 @@ async def test_gemini_mode_is_switched_from_pro_to_flash_and_verified():
         ]
     )
 
-    assert await client._ensure_gemini_flash("session") is True
+    assert await client._ensure_gemini_mode("session") is True
     assert client.clicks == ["@e57", "@e62"]
 
 
@@ -1384,8 +1524,64 @@ async def test_gemini_accepts_versioned_flash_mode_label():
         ['@e60 button "Open mode picker, currently 3.8 Flash [has-submenu]"']
     )
 
-    assert await client._ensure_gemini_flash("session") is True
+    assert await client._ensure_gemini_mode("session") is True
     assert client.clicks == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_flash_lite_is_not_flash_and_is_never_selected():
+    client = GeminiFlashModeClient([
+        '@e1 button "Open mode picker, currently Flash-Lite [has-submenu]"',
+        '@e2 menuitem "Flash-Lite Fast"\n@e3 menuitem "Flash All-around help"\n@e4 menuitem "Pro"',
+        '@e1 button "Open mode picker, currently Flash [has-submenu]"',
+    ])
+    assert await client._ensure_gemini_mode("session") is True
+    assert client.clicks == ["@e1", "@e3"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_does_not_fall_back_when_exact_flash_is_unavailable():
+    menu = '@e2 menuitem "Flash-Lite"\n@e4 menuitem "Pro"'
+    client = GeminiFlashModeClient([
+        '@e1 button "Open mode picker, currently Flash-Lite [has-submenu]"',
+        *[menu for _ in range(5)],
+    ])
+    assert await client._ensure_gemini_mode("session") is False
+    assert client.clicks == ["@e1"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_auto_uses_the_page_selected_auto_mode(monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_GEMINI_MODE", "auto")
+    client = GeminiFlashModeClient([
+        '@e1 button "Open mode picker, currently Gemini Auto [has-submenu]"',
+    ])
+    assert await client._ensure_gemini_mode("session") is True
+    assert client.clicks == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_flash_lite_can_be_explicitly_selected(monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_GEMINI_MODE", "flash-lite")
+    client = GeminiFlashModeClient([
+        '@e1 button "Open mode picker, currently Flash [has-submenu]"',
+        '@e2 menuitemradio "3.8 Flash All-around help"\n@e3 menuitemradio "3.5 Flash-Lite Fastest answers"',
+        '@e1 button "Open mode picker, currently Flash-Lite [has-submenu]"',
+    ])
+    assert await client._ensure_gemini_mode("session") is True
+    assert client.clicks == ["@e1", "@e3"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_flash_lite_accepts_quick_answers_menu_label(monkeypatch):
+    monkeypatch.setenv("LOOK4GEO_GEMINI_MODE", "flash-lite")
+    client = GeminiFlashModeClient([
+        '@e1 button "Open mode picker, currently Hydrogen [has-submenu]"',
+        '@e2 menuitemradio "Quick answers 3.5 Flash-Lite" [unchecked]',
+        '@e1 button "Open mode picker, currently 3.5 Flash-Lite [has-submenu]"',
+    ])
+    assert await client._ensure_gemini_mode("session") is True
+    assert client.clicks == ["@e1", "@e2"]
 
 
 @pytest.mark.asyncio
@@ -1483,7 +1679,7 @@ async def test_gemini_submission_check_uses_visible_composer():
     expression = next(call[1] for call in client.calls if call[0] == "evaluate")
     assert "find(node => node.getClientRects().length)" in expression
     assert "user-query" in expression
-    assert "|| !text.trim()" in expression
+    assert "Boolean(composer && !text.trim())" in expression
 
 
 @pytest.mark.asyncio
@@ -2505,3 +2701,57 @@ async def test_browser_adapter_rejects_unknown_platform_without_session(tmp_path
     attempt = await adapter.run("unknown", ProbeRequest(prompt="测试"))
     assert attempt.status == JobStatus.FAILED
     assert client.started == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_sidebar_links_survive_inline_source_dialog_failure(monkeypatch):
+    client = GeminiSidebarClient()
+
+    async def inline_failure(session_id):
+        raise RuntimeError("inline source dialog unavailable")
+
+    monkeypatch.setattr(client, "_collect_gemini_source_cards", inline_failure)
+    sources, status, diagnostic = await client._collect_visible_sources("session", "gemini", [])
+    assert {source.url for source in sources} == {
+        "https://sidebar.example/first",
+        "https://sidebar.example/second",
+    }
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "inline source dialog unavailable"
+
+
+@pytest.mark.asyncio
+async def test_gemini_missing_view_sources_requires_no_keyboard_cleanup():
+    client = BskCliClient("81483588", poll_interval=0)
+
+    seen = []
+
+    async def run(*args, **kwargs):
+        seen.append(args[0])
+        assert args[0] in {"observe", "press"}
+        if len(seen) == 1:
+            return {"text": '@e1 button "Show more options"'}
+        return {"text": '@e2 menuitem "Report"'}
+
+    client._run_json = run
+    assert await client._collect_gemini_view_sources("session") == []
+    assert seen.count("press") == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_keeps_verified_sidebar_links_when_browser_control_is_interrupted(monkeypatch):
+    from look4geo_probe.adapters.browser_skill import BrowserControlInterrupted
+
+    client = GeminiSidebarClient()
+
+    async def interrupted(session_id):
+        raise BrowserControlInterrupted("The strict observation changed before this action")
+
+    monkeypatch.setattr(client, "_collect_gemini_source_cards", interrupted)
+    sources, status, diagnostic = await client._collect_visible_sources("session", "gemini", [])
+    assert {source.url for source in sources} == {
+        "https://sidebar.example/first",
+        "https://sidebar.example/second",
+    }
+    assert status == SourceCaptureStatus.FAILED
+    assert "strict observation changed" in diagnostic

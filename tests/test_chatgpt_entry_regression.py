@@ -1,4 +1,5 @@
 import pytest
+from urllib.parse import parse_qs, urlsplit
 from look4geo_probe.adapters.browser_skill import BskCliClient, PLATFORMS
 
 
@@ -22,9 +23,9 @@ class EntryClient(BskCliClient):
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_silent_fill_failure_is_detected():
+async def test_chatgpt_silent_prefill_failure_is_detected():
     client = EntryClient("")
-    with pytest.raises(RuntimeError, match="ChatGPT prompt entry could not be verified"):
+    with pytest.raises(RuntimeError, match="ChatGPT prompt entry via .* could not be verified"):
         await client._enter_prompt("session", "chatgpt", "@stale", "日本語の質問")
 
 
@@ -37,20 +38,26 @@ async def test_empty_composer_never_counts_as_submission():
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_fill_uses_stable_selector_and_checks_content():
+async def test_chatgpt_prefill_preserves_unicode_and_does_not_submit():
     client = EntryClient("日本語の質問")
     await client._enter_prompt("session", "chatgpt", "@stale", "日本語の質問")
-    assert client.calls[0] == ("click", PLATFORMS["chatgpt"]["composer_selector"], "--session", "session")
-    assert client.calls[1][0] == "evaluate"
-    assert "insertText" in client.calls[1][1]
+    assert len(client.calls) == 1
+    action, url, *rest = client.calls[0]
+    assert action == "navigate"
+    assert urlsplit(url).hostname == "chatgpt.com"
+    assert parse_qs(urlsplit(url).query) == {"q": ["日本語の質問"]}
+    assert rest == ["--wait-until", "domcontentloaded", "--session", "session"]
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_session_requests_foreground_on_dedicated_browser():
+async def test_chatgpt_session_warms_the_site_on_dedicated_browser_without_forcing_focus():
     client = EntryClient("")
     async def command(*args, **kwargs):
         client.calls.append(args)
         return {"session_id": "dedicated-session"}
     client._run_json = command
     assert await client.start("chatgpt") == "dedicated-session"
-    assert client.calls == [("session", "start", "--browser", "81483588")]
+    assert client.calls == [
+        ("session", "start", "--browser", "81483588"),
+        ("navigate", PLATFORMS["chatgpt"]["url"], "--session", "dedicated-session"),
+    ]

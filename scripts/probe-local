@@ -16,12 +16,17 @@ if [ -n "$REQUESTED_BROWSER_ID" ]; then
 fi
 
 if [ -n "${LOOK4GEO_LOCKED_BROWSER_ID-}" ]; then
-    for PROBE_BROWSER_ID in "${LOOK4GEO_BROWSER_ID-}" "${LOOK4GEO_CHATGPT_BROWSER_ID-}" "${LOOK4GEO_GEMINI_BROWSER_ID-}"; do
+    for PROBE_BROWSER_ID in "${LOOK4GEO_BROWSER_ID-}" "${LOOK4GEO_CHATGPT_BROWSER_ID-}"; do
         if [ "$PROBE_BROWSER_ID" != "$LOOK4GEO_LOCKED_BROWSER_ID" ]; then
             printf '%s\n' "Browser instance mismatch: this installation is locked to $LOOK4GEO_LOCKED_BROWSER_ID; reconnect the caller with matching configuration." >&2
             exit 2
         fi
     done
+    GEMINI_BROWSER_LOCK=${LOOK4GEO_LOCKED_GEMINI_BROWSER_ID:-$LOOK4GEO_LOCKED_BROWSER_ID}
+    if [ "${LOOK4GEO_GEMINI_BROWSER_ID-}" != "$GEMINI_BROWSER_LOCK" ]; then
+        printf '%s\n' "Gemini browser instance mismatch: this installation requires $GEMINI_BROWSER_LOCK." >&2
+        exit 2
+    fi
 fi
 
 exec "$PROJECT_DIR/.venv/bin/probe" "$@"

@@ -30,7 +30,7 @@ Platform selection is explicit and remains under the caller's control. The curre
 - Perplexity
 - Grok
 
-Qwen is not an active platform in the current unified configuration. Gemini uses Flash-oriented web sampling in this project; API-based model answers are outside the probe's measurement path.
+Qwen is not an active platform in the current unified configuration. The BrowserSkill Gemini adapter defaults to Flash. Set `LOOK4GEO_GEMINI_MODE=auto` in `config/local.env` for accounts with the Gemini Auto web mode. Set `LOOK4GEO_GEMINI_MODE=flash-lite` explicitly to sample Flash-Lite. The adapter verifies the configured mode before submission. If the signed-in account opens Gemini at a URL such as `/u/1/app`, set `LOOK4GEO_GEMINI_ACCOUNT_SLOT=1` in the same file. Record the mode and account used with each baseline. API-based model answers are outside the probe's measurement path.
 
 ## Architecture
 

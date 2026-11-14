@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .base import ProbeAdapter
 from .types import AdapterHealth
@@ -24,6 +25,85 @@ from ..models import (
 )
 from ..sources import citations_from_sources, merge_sources, normalize_source_url
 from ..validity import CONTAMINATION_RE
+
+# 2026-11-01: bsk >= 0.4.0 (protocol 1.7) 起，下列「写操作」必须带 cooperate 上下文。
+# 读操作（navigate / observe / snapshot / get-html / browsers / session start）不在其列。
+_CONTEXT_REQUIRED = frozenset({
+    "click",
+    "evaluate",
+    "fill",
+    "press",
+    "select",
+    "upload",
+    "reload",
+    "hover",
+    "scroll-to",
+    "wheel",
+    "drag",
+    "focus",
+    "blur",
+    "navigate-back",
+    "navigate-forward",
+    # 2026-11-01 实测补充：`emulate`（UA / Accept-Language 注入）同样需要上下文，
+    # 漏掉它会让 ChatGPT 的 locale 注入整段失败（`permission_denied`）。
+    "emulate",
+    "dialog",
+    "tab",
+    "window",
+    # 2026-11-01 实测：**只有新窗口的第一次导航**免上下文；此后每次 `navigate` 都要上下文。
+    # 因此把 navigate 也纳入：拿不到上下文时（窗口还是空白页）仍按原样执行，第一次必然成功。
+    "navigate",
+})
+
+# 2026-11-06: 0.4.2 只要求「脚本 / 未定向按键 / 视觉点击」带顶层 observation_id；
+# **定向**动作（带 --selector / --ref）复用 context 即可 —— 强行带观测会在页面滚动/流式输出时
+# 报 `The strict observation changed before this action`。
+_NEEDS_OBSERVATION = frozenset({"evaluate", "emulate", "navigate"})
+_NEEDS_OBSERVATION_UNTARGETED = frozenset({"press", "click"})
+
+
+class BrowserControlInterrupted(Exception):
+    """Do not fall back to another input action when ownership/effect is uncertain."""
+
+
+def _control_interruption(raw: bytes, message: str) -> bool:
+    try:
+        payload = json.loads(raw)
+        details = payload.get("data") or {}
+        reason = str(details.get("reason") or payload.get("code") or "")
+        if details.get("effect_state") in {"unknown", "applied"} or reason in {
+            "user_aborted", "user_activity_revoked", "human_in_control", "user_intervened",
+        }:
+            return True
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return bool(re.search(r"user activity revoked|user_aborted|user aborted|human is in control", message, re.I))
+
+
+async def _communicate_bsk(process: asyncio.subprocess.Process, timeout: float) -> tuple[bytes, bytes]:
+    try:
+        return await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Reap only the CLI child that this operation owns, not the daemon.
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.communicate()
+        raise
+
+# 上下文失效 / 页面自行变化 / 扩展瞬时抖动 —— 这三类都值得重新 sync 后重放一次。
+_RETRYABLE_RE = re.compile(
+    r"requires the context|observed page or control|observed content changed"
+    r"|synchronize|Receiving end does not exist"
+    # 2026-11-06: bsk 0.4.2（扩展 protocol 1.8）新增「严格观测」语义 ——
+    # 每次写动作都要一次**未使用**的 cooperate sync，脚本类动作还要显式带 observation_id。
+    r"|unused strict observation|valid control context"
+    r"|strict observation changed|page frame changed"
+    r"|observation changed before this action",
+    re.IGNORECASE,
+)
 
 PLATFORMS = {
     "doubao": {
@@ -230,7 +310,7 @@ PLATFORMS["grok"].update(
 REF_PATTERN = re.compile(r"(@e\d+)\s+textbox\s+\"([^\"]+)\"")
 BUTTON_REF_PATTERN = re.compile(r"(@e\d+)\s+button\s+\"([^\"]+)\"")
 CONTROL_REF_PATTERN = re.compile(
-    r"(@e\d+)\s+(?:button|menuitem)\s+\"([^\"]+)\""
+    r"(@e\d+)\s+(?:button|menuitem(?:radio)?)\s+\"([^\"]+)\""
 )
 URL_PATTERN = re.compile(r"https?://[^\s<>\])}\u200b\u2060]+")
 
@@ -334,6 +414,7 @@ class BrowserProbeOutput:
     login_required: bool = False
     failure: FailureKind | None = None
     diagnostic: str | None = None
+    retryable: bool = True
 
 
 @dataclass(frozen=True)
@@ -505,7 +586,7 @@ class BskCliClient:
         )
 
     def _args_with_pinned_tab(self, args: tuple[str, ...]) -> tuple[str, ...]:
-        if "--tab-id" in args or "--session" not in args:
+        if args[:1] == ("tab",) or "--tab-id" in args or "--session" not in args:
             return args
         session_index = args.index("--session") + 1
         if session_index >= len(args):
@@ -513,19 +594,124 @@ class BskCliClient:
         tab_id = self._session_tabs.get(args[session_index])
         return args + ("--tab-id", str(tab_id)) if tab_id is not None else args
 
+    # ---- 2026-11-01: bsk >= 0.4.0 (protocol 1.7) 兼容层 ----
+    # 新协议下所有「写操作」都必须携带 cooperate 上下文（--context），
+    # 该上下文由 `bsk cooperate --session S sync` 返回，且**每次只授权一个动作**。
+    # 本层只补协议握手，不触碰题面 / 有效性闸门 / 提及判据 / locale 注入，故不影响与基线的可比性。
+    async def _cooperate_context(
+        self, session_id: str, timeout: float, tab_id: int | None = None
+    ) -> tuple[str, str]:
+        """取一次 cooperate 上下文；任何失败都返回空串（退化为旧行为，不阻断）。
+
+        2026-11-01 实测两点：
+        1. `bsk cooperate sync` **支持 `--tab-id`** —— 上下文必须与后续动作指向**同一个 tab**，
+           否则动作会报 `This action requires the context returned by the latest cooperate sync`。
+        2. sync 本身也会因「页面还在加载 / 观察被取代」短暂失败
+           （`This context belongs to a different or superseded observation`）⇒ 原地重试 2–3 次。
+        """
+        base = ["bsk", "cooperate", "--session", session_id, "sync"]
+        if tab_id is not None:
+            base += ["--tab-id", str(tab_id)]
+        for attempt in range(3):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *base,
+                    "--json",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await _communicate_bsk(proc, min(timeout, 30.0))
+                if proc.returncode == 0:
+                    data = json.loads(out.decode("utf-8"), strict=False)
+                    state = data.get("state") or {}
+                    if data.get("ready") is False or state.get("mode") == "human":
+                        raise BrowserControlInterrupted("Browser control not ready; wait for hand-back before continuing")
+                    context_id = str(data.get("context_id") or "")
+                    if context_id:
+                        return context_id, str(data.get("observation_id") or "")
+                elif _control_interruption(out, command_error_detail(out, b"")):
+                    raise BrowserControlInterrupted(command_error_detail(out, b""))
+            except BrowserControlInterrupted:
+                raise
+            except (OSError, asyncio.TimeoutError, ValueError):
+                pass
+            if attempt < 2:
+                await asyncio.sleep(1.2)
+        return "", ""
+
     async def _run_json(self, *args: str, timeout: float = 30.0) -> dict | list:
+        navigation_host = urlsplit(args[1]).hostname if len(args) >= 2 and args[0] == "navigate" else None
+        if ("--wait-until" not in args
+                and navigation_host in {"chatgpt.com", "gemini.google.com", "www.perplexity.ai"}):
+            # The caller separately verifies the composer and mode; unrelated
+            # network resources need not finish before those checks begin.
+            args += ("--wait-until", "domcontentloaded")
         args = self._args_with_pinned_tab(args)
-        process = await asyncio.create_subprocess_exec(
-            "bsk",
-            *args,
-            "--json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        if process.returncode != 0:
-            raise RuntimeError(command_error_detail(stdout, stderr))
-        return json.loads(stdout.decode("utf-8"))
+        mutating = bool(args) and args[0] in _CONTEXT_REQUIRED and "--context" not in args and args[:2] != ("tab", "list")
+        # 2026-11-01: 流式回答期间页面每帧都在变，`evaluate` 的整页校验几乎必然失效 ⇒
+        # 只读型 evaluate 给更大的重试预算（8 次）；其余写命令保持 3 次，避免重复提交。
+        attempts = 8 if (bool(args) and args[0] == "evaluate") else 3
+        last_error = ""
+        for attempt in range(attempts):
+            call = args
+            if mutating and "--session" in call:
+                session_id = call[call.index("--session") + 1]
+                control_tab = self._session_tabs.get(session_id)
+                task_tab_action = call[:2] in {("tab", "close"), ("tab", "select")}
+                if task_tab_action and len(call) > 2 and call[2].isdigit():
+                    control_tab = int(call[2])
+                context_id, observation_id = await self._cooperate_context(
+                    session_id, timeout, control_tab
+                )
+                if context_id:
+                    call = call + ("--context", context_id)
+                    # 2026-11-06: 脚本/键盘/视觉点击类动作必须显式带顶层 observation_id
+                    positional_click_target = call[0] == "click" and len(call) > 1 and not call[1].startswith("--")
+                    untargeted = not (positional_click_target or "--selector" in call or "--ref" in call)
+                    if observation_id and (
+                        call[0] in _NEEDS_OBSERVATION
+                        or task_tab_action
+                        or (call[0] in _NEEDS_OBSERVATION_UNTARGETED and untargeted)
+                    ):
+                        call = call + ("--observation", observation_id)
+            process = await asyncio.create_subprocess_exec(
+                "bsk",
+                *call,
+                "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await _communicate_bsk(process, timeout)
+            if os.environ.get("LOOK4GEO_BSK_TRACE"):
+                try:
+                    with open(os.environ["LOOK4GEO_BSK_TRACE"], "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps({
+                            "cmd": list(call),
+                            "rc": process.returncode,
+                            "err": command_error_detail(stdout, stderr)[:400],
+                        }, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            if process.returncode != 0:
+                last_error = command_error_detail(stdout, stderr)
+                if _control_interruption(stdout, last_error) or _control_interruption(stderr, last_error):
+                    raise BrowserControlInterrupted(last_error)
+                # 上下文失效 / 页面自行变化 / 扩展瞬时抖动 ⇒ 重新 sync 后重放同一动作
+                navigation_disconnected = (
+                    navigation_host == "chatgpt.com" and "net::ERR_CONNECTION_CLOSED" in last_error
+                )
+                observation_invalidated = (
+                    args[0] in {"observe", "evaluate"}
+                    and "document changed during observation; observe again" in last_error.casefold()
+                )
+                if attempt < attempts - 1 and (
+                    _RETRYABLE_RE.search(last_error) or navigation_disconnected or observation_invalidated
+                ):
+                    await asyncio.sleep(1.2)
+                    continue
+                raise RuntimeError(last_error)
+            return json.loads(stdout.decode("utf-8"))
+        raise RuntimeError(last_error or "bsk command failed")
 
     async def start(self, platform: str) -> str:
         if not self.browser_instance_id:
@@ -534,19 +720,46 @@ class BskCliClient:
                 "from the probe Chrome profile. No daily-browser fallback is allowed."
             )
         args = ["session", "start", "--browser", self.browser_instance_id]
-        if platform not in {"gemini", "chatgpt"}:
-            args.append("--no-focus")
         result = await self._run_json(*args)
-        return str(result["session_id"])
+        session_id = str(result["session_id"])
+        if platform != "chatgpt":
+            return session_id
+        # 2026-11-01: bsk 0.4.0 起的 Agent Window 初始页没有扩展内容脚本
+        # （`evaluate` 直接报 `Could not establish connection. Receiving end does not exist.`）。
+        # ChatGPT 分支在 start 之后**立刻**要 `evaluate navigator.userAgent`（locale 注入），
+        # 所以必须先把 tab 落到真实站点上。这里只做"落到目标域"，随后 probe() 仍按原逻辑导航。
+        # 2026-11-01 补：首次导航偶发 `net::ERR_CONNECTION_CLOSED`（网络瞬断），原地重试 3 次。
+        try:
+            navigation = await self._run_json(
+                "navigate", PLATFORMS[platform]["url"], "--session", session_id, timeout=60.0,
+            )
+            if isinstance(navigation, dict) and navigation.get("tab_id") is not None:
+                self._session_tabs[session_id] = int(navigation["tab_id"])
+        except BaseException:
+            try:
+                await self.stop(session_id)
+            except Exception:
+                pass
+            raise
+        return session_id
 
     async def probe(
         self, session_id: str, platform: str, prompt: str, timeout: float
     ) -> BrowserProbeOutput:
         config = PLATFORMS[platform]
+        url = config["url"]
+        navigation_wait = ()
+        if platform == "gemini":
+            account_slot = os.environ.get("LOOK4GEO_GEMINI_ACCOUNT_SLOT", "").strip()
+            if account_slot:
+                if not re.fullmatch(r"[0-9]+", account_slot):
+                    raise RuntimeError("LOOK4GEO_GEMINI_ACCOUNT_SLOT must be a numeric Google account slot")
+                url = f"https://gemini.google.com/u/{account_slot}/app"
         if platform == "chatgpt":
             await self._set_chatgpt_english_locale(session_id)
+            navigation_wait = ("--wait-until", "commit")
         navigation = await self._run_json(
-            "navigate", config["url"], "--session", session_id, timeout=timeout
+            "navigate", url, *navigation_wait, "--session", session_id, timeout=timeout
         )
         if isinstance(navigation, dict) and navigation.get("tab_id") is not None:
             self._session_tabs[session_id] = int(navigation["tab_id"])
@@ -587,19 +800,19 @@ class BskCliClient:
                 diagnostic="Perplexity standard search mode could not be confirmed",
             )
         if platform == "gemini":
-            flash_confirmed = False
+            mode_confirmed = False
             for _ in range(3):
                 try:
-                    flash_confirmed = await self._ensure_gemini_flash(session_id)
+                    mode_confirmed = await self._ensure_gemini_mode(session_id)
                 except RuntimeError:
-                    flash_confirmed = False
-                if flash_confirmed:
+                    mode_confirmed = False
+                if mode_confirmed:
                     break
                 await asyncio.sleep(self.poll_interval)
-            if not flash_confirmed:
+            if not mode_confirmed:
                 return BrowserProbeOutput(
                     failure=FailureKind.SEND_FAILED,
-                    diagnostic="Gemini Flash mode could not be confirmed",
+                    diagnostic="Configured Gemini mode could not be confirmed",
                 )
 
         baseline_page = await self._answer_page(session_id, config["answer_selector"])
@@ -617,6 +830,7 @@ class BskCliClient:
         stable_rounds = 0
         saw_answer_candidate = False
         saw_attachment_only_answer = False
+        gemini_reply_announced = False
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
@@ -659,6 +873,12 @@ class BskCliClient:
                     failure=FailureKind.RATE_LIMITED,
                     diagnostic=rate_limit_diagnostic(page),
                 )
+            if platform == "chatgpt" and page.get("account_changed"):
+                return BrowserProbeOutput(
+                    failure=FailureKind.SEND_FAILED,
+                    diagnostic="ChatGPT reports the account changed during submission; confirm the sampling account before retrying",
+                    retryable=False,
+                )
             page_text = str(page.get("page_text") or "").casefold()
             if platform == "gemini" and any(
                 marker in page_text for marker in GEMINI_TRANSIENT_ERROR_MARKERS
@@ -672,6 +892,11 @@ class BskCliClient:
             delta = [candidate for candidate in delta if not is_prompt_echo(candidate, prompt)]
             saw_answer_candidate = saw_answer_candidate or bool(delta)
             current_text = select_main_answer(platform, delta)
+            if platform == "gemini":
+                gemini_reply_announced |= bool(re.search(
+                    r"(?im)^\s*(?:Gemini replied|Gemini 已回复|Gemini 已回答)\s*$",
+                    page_text,
+                ))
             if not current_text:
                 continue
             if platform == "gemini":
@@ -748,6 +973,19 @@ class BskCliClient:
             else:
                 stable_rounds = 0
             previous = current_text
+        if gemini_reply_announced and not saw_answer_candidate:
+            try:
+                conversation_url = await self._current_url(session_id)
+            except RuntimeError:
+                conversation_url = None
+            return BrowserProbeOutput(
+                conversation_url=conversation_url,
+                failure=FailureKind.EXTRACTION_FAILED,
+                diagnostic="Gemini announced a reply but no answer appeared before timeout",
+                source_capture_status=SourceCaptureStatus.FAILED,
+                source_capture_diagnostic="No visible answer to associate with sources",
+                retryable=False,
+            )
         if saw_answer_candidate:
             return BrowserProbeOutput(
                 failure=FailureKind.EXTRACTION_FAILED,
@@ -773,6 +1011,24 @@ class BskCliClient:
     ) -> None:
         if platform == "chatgpt":
             selector = PLATFORMS["chatgpt"]["composer_selector"]
+            # 2026-11-06: bsk 0.4.2（扩展 protocol 1.8）引入 strict shared-control ——
+            # 对 composer 的**真实鼠标点击**会被判定为人工接管（mode=human），
+            # 之后所有写动作一律 `User activity revoked this action`；
+            # 用 `evaluate` + execCommand 注入文本也会被记成 human input。
+            # 唯一稳定且不改题面的路径：URL `?q=` 预填（页面自身写入 composer）+ press Enter。
+            # 文本仍是逐字原文（仅 URL 编码），提交动作是键盘事件，不会被判为人工。
+            prefill_url = "https://chatgpt.com/?q=" + quote(prompt, safe="")
+            for _ in range(3):
+                await self._run_json(
+                    "navigate", prefill_url, "--wait-until", "domcontentloaded",
+                    "--session", session_id, timeout=timeout,
+                )
+                await asyncio.sleep(self.poll_interval + 1.5)
+                if (await self._composer_text(session_id, selector)).strip() == prompt.strip():
+                    return
+            raise RuntimeError("ChatGPT prompt entry via ?q= prefill could not be verified")
+        if platform == "chatgpt_legacy_exec_command":
+            selector = PLATFORMS["chatgpt"]["composer_selector"]
             # CG-14 (2026-10-10): the composer is now a ProseMirror `div[contenteditable]`,
             # and `bsk fill` is unreliable against it — its default clear-first pass trips
             # "the fill target changed during the action" (React rebuilds the editable node),
@@ -793,10 +1049,25 @@ class BskCliClient:
                 "inputType:'insertText',data:" + json.dumps(prompt) + "})); "
                 "return target.innerText || target.textContent || ''; })()"
             )
+            await asyncio.sleep(2.0)  # 让首屏渲染稳定，避免 click 撞上 "page frame changed"
             for _ in range(3):
-                await self._run_json(
-                    "click", selector, "--session", session_id, timeout=timeout
-                )
+                # Gemini 首页有持续动画，strict observation 极易被刷掉；
+                # 定向 click 自身带 3 次重试仍可能全灭，这里再加一层外层重试。
+                last_error: Exception | None = None
+                for _try in range(4):
+                    try:
+                        await self._run_json(
+                            "click", selector, "--session", session_id, timeout=timeout
+                        )
+                        last_error = None
+                        break
+                    except RuntimeError as exc:
+                        last_error = exc
+                        if "observation" not in str(exc) and "frame changed" not in str(exc):
+                            raise
+                        await asyncio.sleep(1.0)
+                if last_error is not None:
+                    raise last_error
                 await self._run_json(
                     "evaluate", expression, "--session", session_id, timeout=timeout
                 )
@@ -828,13 +1099,37 @@ class BskCliClient:
             raise RuntimeError("Doubao prompt entry could not be verified after 3 attempts")
         if platform == "gemini":
             selector = PLATFORMS[platform]["composer_selector"]
-            await self._run_json(
-                "fill", "--selector", selector, "--value", prompt,
-                "--session", session_id, timeout=timeout,
-            )
-            if (await self._composer_text(session_id, selector)).strip() != prompt.strip():
-                raise RuntimeError("Gemini native prompt entry could not be verified")
-            return
+            # 2026-11-07: Gemini 前端换成 Quill 编辑器（`ql-editor`）。
+            # 直接 `fill` 只写 DOM、不进 Quill 模型 —— 回车与发送按钮都是空转（no-op），
+            # 页面停在草稿态。实测唯一稳定序列：
+            #   ① 真点一次编辑器让 Quill 取得焦点（不会触发 shared-control 的 human 接管）
+            #   ② fill 写入文本
+            #   ③ 打一个 space 再 Backspace —— 用真实按键触发 Quill 的 input 同步
+            #   ④ 校验 innerText 与题面逐字相等后才返回，交给 _submit_prompt 按 Enter
+            for _ in range(3):
+                await self._run_json(
+                    "click", selector, "--session", session_id, timeout=timeout
+                )
+                await asyncio.sleep(0.6)
+                await self._run_json(
+                    "fill", "--selector", selector, "--value", prompt,
+                    "--session", session_id, timeout=timeout,
+                )
+                await asyncio.sleep(0.4)
+                await self._run_json(
+                    "press", "space", "--selector", selector,
+                    "--session", session_id, timeout=timeout
+                )
+                await asyncio.sleep(0.25)
+                await self._run_json(
+                    "press", "Backspace", "--selector", selector,
+                    "--session", session_id, timeout=timeout
+                )
+                await asyncio.sleep(0.25)
+                if (await self._composer_text(session_id, selector)).strip() == prompt.strip():
+                    return
+                await asyncio.sleep(self.poll_interval)
+            raise RuntimeError("Gemini Quill prompt entry could not be verified")
         if platform == "grok":
             candidate_ref = textbox_ref
             selector = PLATFORMS[platform]["composer_selector"]
@@ -1023,13 +1318,16 @@ class BskCliClient:
                 "(() => { const composers = [...document.querySelectorAll(" +
                 json.dumps(PLATFORMS["gemini"]["composer_selector"]) +
                 ")]; const composer = composers.find(node => node.getClientRects().length); "
-                "const text = composer ? (composer.innerText || composer.textContent || "") : ""; "
+                "const text = composer ? (composer.innerText || composer.textContent || '') : ''; "
                 "const stop = [...document.querySelectorAll('button')].some(button => "
                 "/stop/i.test((button.getAttribute('aria-label') || '') + ' ' + "
-                "(button.innerText || ''))); const conversation = /^\\/app\\/.+/.test(location.pathname); "
+                "(button.innerText || ''))); const conversation = /^\\/(?:u\\/\\d+\\/)?app\\/.+/.test(location.pathname); "
                 "const answer = document.querySelector('message-content .markdown'); "
                 "const userQuery = document.querySelector('user-query, .query-text, .user-query'); "
-                "return {submitted: stop || conversation || Boolean(answer) || Boolean(userQuery) || !text.trim(), "
+                "const platformError = (document.body?.innerText || '').match("
+                "/Something went wrong(?:\\s*\\(\\d+\\))?|出了点问题|出错了/i); "
+                "return {submitted: stop || conversation || Boolean(answer) || Boolean(userQuery) || Boolean(composer && !text.trim()), "
+                "platform_error:platformError?.[0] || null, "
                 "composerEmpty: !text.trim(), conversation, answer: Boolean(answer), "
                 "userQuery: Boolean(userQuery)}; })()"
             )
@@ -1075,6 +1373,8 @@ class BskCliClient:
                         "evaluate", state_expression, "--session", session_id, timeout=timeout
                     )
                     state = self._result_value(result)
+                    if isinstance(state, dict) and state.get("platform_error"):
+                        raise RuntimeError("Gemini platform error: " + str(state["platform_error"]))
                     if state is True or (
                         isinstance(state, dict) and state.get("submitted")
                     ):
@@ -1194,15 +1494,21 @@ class BskCliClient:
         )
 
     async def _chatgpt_english_locale_ready(self, session_id: str) -> bool:
-        result = await self._run_json(
-            "evaluate",
-            "({navigatorLanguage:navigator.language,documentLanguage:document.documentElement.lang})",
-            "--session", session_id,
-        )
-        state = self._result_value(result)
+        for _ in range(6):
+            result = await self._run_json(
+                "evaluate",
+                "({navigatorLanguage:navigator.language,documentLanguage:document.documentElement?.lang,"
+                "documentReady:document.readyState!=='loading'})",
+                "--session", session_id,
+            )
+            state = self._result_value(result)
+            if isinstance(state, dict) and state.get("documentReady") is not False:
+                break
+            await asyncio.sleep(self.poll_interval)
         language = self._buyer_locales.get(session_id, "en-US").split("-")[0]
         verified = bool(
             isinstance(state, dict)
+            and state.get("documentReady") is not False
             and str(state.get("navigatorLanguage") or "").casefold().split("-")[0] == language
             and str(state.get("documentLanguage") or "").casefold().split("-")[0] == language
         )
@@ -1243,7 +1549,25 @@ class BskCliClient:
             await asyncio.sleep(self.poll_interval)
         return False
 
-    async def _ensure_gemini_flash(self, session_id: str) -> bool:
+    async def _ensure_gemini_mode(self, session_id: str) -> bool:
+        # Flash-Lite is a separate mode. Substring matching silently admitted
+        # it both in the current-mode label and in the list of menu choices.
+        mode = os.environ.get("LOOK4GEO_GEMINI_MODE", "flash").strip().casefold()
+        if mode not in {"auto", "flash", "flash-lite"}:
+            raise RuntimeError("LOOK4GEO_GEMINI_MODE must be auto, flash or flash-lite")
+        mode_name = r"(?:Gemini\s+)?(?:\d+(?:\.\d+)*\s+)?Flash"
+        if mode == "auto":
+            mode_name = r"(?:Gemini\s+)?Auto"
+        if mode == "flash-lite":
+            mode_name += r"[\s\-‐‑–—]+Lite"
+        current_mode = re.compile(
+            rf'Open mode picker, currently\s+{mode_name}(?:\s+\[has-submenu\])?\s*"',
+            re.I,
+        )
+        choice_prefix = r"(?:Quick answers\s+)?" if mode == "flash-lite" else ""
+        mode_choice = re.compile(
+            rf"^(?:Selected\s+)?{choice_prefix}{mode_name}(?![\s\-‐‑–—]*Lite\b)(?=$|\s)", re.I
+        )
         picker_ref = None
         readiness_deadline = asyncio.get_running_loop().time() + 90
         for _ in range(45):
@@ -1251,7 +1575,7 @@ class BskCliClient:
                 "observe", "--session", session_id, timeout=30
             )
             page_text = str(observation.get("text", ""))
-            if re.search(r"Open mode picker, currently [^\"\n]*Flash", page_text, re.I):
+            if current_mode.search(page_text):
                 return True
             picker_ref = self._find_control_ref(
                 page_text, ("Open mode picker, currently",)
@@ -1262,27 +1586,24 @@ class BskCliClient:
         if picker_ref is None:
             return False
         await self._run_json("click", picker_ref, "--session", session_id, timeout=30)
-        flash_ref = None
+        mode_ref = None
         for _ in range(5):
             menu = await self._run_json("observe", "--session", session_id, timeout=30)
-            flash_ref = self._find_control_ref(
-                str(menu.get("text", "")), ("3.8 Flash", "Flash")
-            )
-            if flash_ref is not None:
+            mode_ref = next((
+                ref for ref, label in CONTROL_REF_PATTERN.findall(str(menu.get("text", "")))
+                if mode_choice.match(label)
+            ), None)
+            if mode_ref is not None:
                 break
             await asyncio.sleep(self.poll_interval)
-        if flash_ref is None:
+        if mode_ref is None:
             return False
-        await self._run_json("click", flash_ref, "--session", session_id, timeout=30)
+        await self._run_json("click", mode_ref, "--session", session_id, timeout=30)
         for _ in range(5):
             verified = await self._run_json(
                 "observe", "--session", session_id, timeout=30
             )
-            if re.search(
-                r"Open mode picker, currently [^\"\n]*Flash",
-                str(verified.get("text", "")),
-                re.I,
-            ):
+            if current_mode.search(str(verified.get("text", ""))):
                 return True
             await asyncio.sleep(self.poll_interval)
         return False
@@ -1322,7 +1643,21 @@ class BskCliClient:
             # answer container also includes the expanded search results.
             "const answerBlocks = n => "
             + ("[...n.querySelectorAll('.ai-entry-block.ai-markdown')]" if selector == ".ai-entry" else "[n]")
-            + "; const answerText = n => answerBlocks(n).map(b => (b.innerText || '').trim()).filter(Boolean).join('\\n\\n'); "
+            + "; const geminiDomText = root => { const parts=[]; "
+            "const walk=n=>{if(n.nodeType===3){parts.push(n.nodeValue||'');return;} "
+            "if(n.nodeType!==1 || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(n.tagName) || "
+            "(n!==root && n.getAttribute('aria-hidden')==='true'))return; "
+            "if(n.tagName==='BR'){parts.push('\\n');return;} "
+            "const block=/^(P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE|TR)$/.test(n.tagName); "
+            "if(block)parts.push('\\n\\n'); for(const child of n.childNodes)walk(child); "
+            "if(block)parts.push('\\n\\n');}; walk(root); "
+            "return parts.join('').replace(/\\n{3,}/g,'\\n\\n').trim();}; "
+            "const answerText = n => answerBlocks(n).map(b => {const shown=(b.innerText||'').trim(); "
+            "if(location.hostname!=='gemini.google.com' || !b.closest('model-response')) return shown; "
+            "const stored=geminiDomText(b); if(!shown) return stored; "
+            "const shownCompact=shown.replace(/\\s+/g,' '), storedCompact=stored.replace(/\\s+/g,' '); "
+            "return storedCompact.length > shownCompact.length && storedCompact.startsWith(shownCompact) "
+            "? stored : shown;}).filter(Boolean).join('\\n\\n'); "
             "const answerLinks = n => answerBlocks(n).flatMap(b => [...b.querySelectorAll('a[href]')]); "
             "const buttons = [...document.querySelectorAll('button')]; "
             # A stable search summary is not a completed ChatGPT turn. The live
@@ -1338,7 +1673,11 @@ class BskCliClient:
             "const yuanbaoStillGenerating = location.hostname === 'yuanbao.tencent.com' && "
             "Boolean(latestYuanbaoAnswer) && "
             "!latestYuanbaoAnswer.querySelector('[aria-label=重新生成]'); "
-            "return {completion_confirmed:completionConfirmed,answers:nodes.map(answerText).filter(Boolean),"
+            "const accountChanged = location.hostname === 'chatgpt.com' && "
+            "[...document.querySelectorAll('[role=alert]')].some(n => "
+            "/^Your account changed[.!]?\\s+Send your message again\\b/i.test((n.innerText || '').trim())); "
+            "return {completion_confirmed:completionConfirmed,account_changed:accountChanged,"
+            "answers:nodes.map(answerText).filter(Boolean),"
             "answer_entries:nodes.map(n => ({text:answerText(n),links:"
             "answerLinks(n).map(a => ({url:a.href,title:"
             "(a.innerText || a.textContent || '').trim() || null}))})).filter(entry => entry.text),"
@@ -1374,6 +1713,27 @@ class BskCliClient:
             if record is not None:
                 candidates.append(record)
 
+        if platform == "chatgpt":
+            try:
+                popovers = await self._collect_chatgpt_popovers(
+                    session_id, frozenset(source.url for source in candidates)
+                )
+            except Exception as error:
+                return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
+            if popovers is not None:
+                cards, diagnostic = popovers
+                for card in cards:
+                    record = self._source_record(
+                        card, role=SourceRole.CITED if card.get("inline_citation") else SourceRole.SURFACED,
+                        origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                        excluded_domains=excluded_domains,
+                    )
+                    if record is not None:
+                        candidates.append(record)
+                return (merge_sources(candidates),
+                        SourceCaptureStatus.FAILED if diagnostic else SourceCaptureStatus.CAPTURED,
+                        diagnostic)
+
         if config.get("answer_sources_only"):
             sources = merge_sources(candidates)
             return (
@@ -1385,40 +1745,31 @@ class BskCliClient:
             )
 
         if platform == "gemini":
-            try:
-                cards = await self._collect_gemini_source_cards(session_id)
-            except Exception as error:
-                return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
-            for card in cards:
-                record = self._source_record(
-                    card,
-                    role=SourceRole.SURFACED,
-                    origin=SourceEvidenceOrigin.SOURCE_PANEL,
-                    excluded_domains=excluded_domains,
-                )
-                if record is not None:
-                    candidates.append(record)
-            try:
-                sidebar_cards = await self._collect_gemini_view_sources(session_id)
-            except Exception as error:
-                return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
-            for card in sidebar_cards:
-                record = self._source_record(
-                    card,
-                    role=SourceRole.SURFACED,
-                    origin=SourceEvidenceOrigin.SOURCE_PANEL,
-                    excluded_domains=excluded_domains,
-                )
-                if record is not None:
-                    candidates.append(record)
+            diagnostics = []
+            for collect in (self._collect_gemini_view_sources, self._collect_gemini_source_cards):
+                try:
+                    cards = await collect(session_id)
+                except BrowserControlInterrupted as error:
+                    return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
+                except Exception as error:
+                    diagnostics.append(str(error))
+                    continue
+                for card in cards:
+                    record = self._source_record(
+                        card,
+                        role=SourceRole.SURFACED,
+                        origin=SourceEvidenceOrigin.SOURCE_PANEL,
+                        excluded_domains=excluded_domains,
+                    )
+                    if record is not None:
+                        candidates.append(record)
             sources = merge_sources(candidates)
-            return (
-                sources,
-                SourceCaptureStatus.CAPTURED
-                if sources
-                else SourceCaptureStatus.NONE_EXPOSED,
-                None,
-            )
+            status = SourceCaptureStatus.NONE_EXPOSED
+            if diagnostics:
+                status = SourceCaptureStatus.FAILED
+            elif sources:
+                status = SourceCaptureStatus.CAPTURED
+            return sources, status, "; ".join(diagnostics) or None
 
         has_source_rule = bool(
             config["source_trigger_labels"] or config["source_trigger_selectors"]
@@ -1538,6 +1889,196 @@ class BskCliClient:
             if expected_count else None
         )
 
+    async def _collect_chatgpt_popovers(self, session_id: str, known_urls: frozenset[str] = frozenset()):
+        """Inspect each DIL citation popover, including chips without anchor URLs.
+
+        A link preview has no Sources heading. Follow aria-controls rather than
+        accepting unrelated dialogs (for example the floating composer).
+        """
+        selector = PLATFORMS["chatgpt"]["answer_selector"]
+        scope = ("const answers=[...document.querySelectorAll(" + json.dumps(selector)
+                 + ")]; const root=answers.at(-1); "
+                 "const triggers=root ? [...root.querySelectorAll('[data-d-component=popover-trigger][aria-haspopup=dialog]')] : []; ")
+        value = self._result_value(await self._run_json(
+            "evaluate", "(() => { " + scope + "return {count:triggers.length,targets:triggers.map(t=>({"
+            "href:t.href||t.closest('a[href]')?.href||t.querySelector('a[href]')?.href||null,"
+            "link_preview:t.getAttribute('role')==='presentation',"
+            "expected_count:1+Number((t.innerText||'').match(/\\+\\s*(\\d+)/)?.[1]||0),"
+            "expects_more:/\\+\\s*\\d+|\\b(?:[2-9]|\\d{2,})\\s+(?:sources?|references?|links?)\\b|"
+            "more\\s+(?:sources?|references?|links?)|更多(?:来源|引用)/i.test("
+            "(t.getAttribute('aria-label')||'')+' '+(t.innerText||''))"
+            "}))}; })()",
+            "--session", session_id, timeout=30))
+        count = int(value.get("count") or 0) if isinstance(value, dict) else 0
+        if not count:
+            return None
+        targets = value.get("targets") or []
+        cards, missing = [], []
+        for index in range(count):
+            target = targets[index] if index < len(targets) else {}
+            direct = normalize_source_url(str(target.get("href") or ""))
+            if target.get("link_preview") and direct in known_urls and not target.get("expects_more"):
+                continue
+            if "href" in target and not target["href"]:
+                grouped, complete, interrupted = await self._collect_chatgpt_source_group(
+                    session_id, scope, index, int(target.get("expected_count") or 1)
+                )
+                cards.extend(grouped)
+                if not complete:
+                    missing.append(index)
+                if interrupted:
+                    missing.extend(range(index + 1, count))
+                    break
+                continue
+            opened = self._result_value(await self._run_json(
+                "evaluate", "(() => { " + scope + f"const t=triggers[{index}]; "
+                "if(!t) return false; if(t.getAttribute('aria-expanded')!=='true') t.click(); return true; })()",
+                "--session", session_id, timeout=30))
+            found = []
+            if opened:
+                for _ in range(8):
+                    page = self._result_value(await self._run_json(
+                        "evaluate", "(() => { " + scope + f"const t=triggers[{index}]; "
+                        "const p=document.getElementById(t?.getAttribute('aria-controls')); "
+                        "if(!p || !p.getClientRects().length) return []; "
+                        "return [...p.querySelectorAll('a[href]')].map(a=>({url:a.href,"
+                        "title:(a.innerText||a.textContent||'').trim()||null,"
+                        "snippet:(a.closest('[data-d-component=row]')||a.parentElement).innerText?.trim()||null})); })()",
+                        "--session", session_id, timeout=30))
+                    if isinstance(page, list) and page:
+                        found = page
+                        break
+                    await asyncio.sleep(self.poll_interval)
+            if found:
+                cards.extend(found)
+            else:
+                # An inline link can also have a hover preview. If that exact
+                # citation is already captured, an unavailable preview does
+                # not erase it. Multi-source or URL-less chips still require
+                # the panel, so partial evidence remains explicitly failed.
+                if direct not in known_urls or target.get("expects_more"):
+                    missing.append(index)
+        diagnostic = f"ChatGPT citation popovers unresolved: {missing} of {count}" if missing else None
+        return cards, diagnostic
+
+    async def _collect_chatgpt_source_group(self, session_id: str, scope: str, index: int, expected_count: int):
+        """Resolve the actual page destinations of a grouped inline citation."""
+        prefix = "(() => { " + scope + f"const t=triggers[{index}]; "
+        cards = []
+        try:
+            group_found = self._result_value(await self._run_json(
+                "evaluate", prefix +
+                "if(!t)return false; t.scrollIntoView({block:'center',behavior:'instant'}); "
+                f"t.setAttribute('data-look4geo-source-group','{index}'); "
+                "return true; })()",
+                "--session", session_id,
+            ))
+            selector = f'[data-look4geo-source-group="{index}"]'
+            if group_found is not True or not await self._chatgpt_source_target_ready(session_id, selector):
+                return cards, False, False
+            await self._run_json("hover", "--selector", selector, "--settle", "500ms", "--session", session_id)
+            for _ in range(2):
+                await self._run_json("click", "--selector", selector, "--session", session_id)
+                expanded = self._result_value(await self._run_json(
+                    "evaluate", prefix + "return t?.getAttribute('aria-expanded')==='true'; })()",
+                    "--session", session_id,
+                ))
+                if expanded is not False:
+                    break
+            panel = None
+            for _ in range(4):
+                observed = self._result_value(await self._run_json(
+                    "evaluate", prefix +
+                    "const p=document.getElementById(t?.getAttribute('aria-controls')); "
+                    "if(t?.getAttribute('aria-expanded')!=='true'||!p?.getClientRects().length)return null; "
+                    "return {links:[...p.querySelectorAll('a[href]')].map(a=>({url:a.href,title:a.innerText.trim()})),"
+                    "buttons:[...p.querySelectorAll('button[data-d-component=pressable]')].map((b,i)=>{"
+                    f"b.setAttribute('data-look4geo-source-card','{index}-'+i);"
+                    "return {title:b.innerText.trim().split('\\n')[1]||b.getAttribute('aria-label')};})}; })()",
+                    "--session", session_id,
+                ))
+                if isinstance(observed, dict) and isinstance(observed.get("links"), list) and isinstance(observed.get("buttons"), list):
+                    panel = observed
+                    if len(panel["links"]) + len(panel["buttons"]) >= expected_count:
+                        break
+                await asyncio.sleep(self.poll_interval)
+            if panel is None:
+                panel = {"links": [], "buttons": []}
+            cards.extend({**link, "inline_citation": True} for link in panel["links"])
+            complete = len(panel["links"]) + len(panel["buttons"]) >= expected_count
+            for card_index, button in enumerate(panel["buttons"]):
+                url, cleaned = await self._chatgpt_source_button_url(session_id, f"{index}-{card_index}")
+                if url:
+                    cards.append({"url": url, "title": button["title"], "inline_citation": True})
+                else:
+                    complete = False
+                if not cleaned:
+                    return cards, False, True
+            await self._run_json(
+                "evaluate", prefix + "if(t?.getAttribute('aria-expanded')==='true')t.click(); return true; })()",
+                "--session", session_id,
+            )
+            return cards, complete, False
+        except (BrowserControlInterrupted, RuntimeError, asyncio.TimeoutError):
+            # The click may have taken effect. Leave all further actions to
+            # session cleanup and keep the evidence already read.
+            return cards, False, True
+
+    async def _chatgpt_source_target_ready(self, session_id: str, selector: str) -> bool:
+        expression = (
+            "(() => { const t=document.querySelector(" + json.dumps(selector) + "); "
+            "if(!t?.getClientRects().length)return false; const r=t.getBoundingClientRect(); "
+            "const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2); "
+            "return !!hit&&(hit===t||t.contains(hit)); })()"
+        )
+        for _ in range(4):
+            if self._result_value(await self._run_json("evaluate", expression, "--session", session_id)) is True:
+                return True
+            await asyncio.sleep(self.poll_interval)
+        return False
+
+    async def _chatgpt_source_button_url(self, session_id: str, card_id: str) -> tuple[str | None, bool]:
+        tab_args = ("tab", "list", "--scope", "agent", "--session", session_id)
+        selector = f'[role=dialog][data-state=open] [data-look4geo-source-card="{card_id}"]'
+        await self._run_json(
+            "evaluate", "document.querySelector(" + json.dumps(selector) +
+            ")?.scrollIntoView({block:'nearest',behavior:'instant'}) ?? null",
+            "--session", session_id,
+        )
+        if not await self._chatgpt_source_target_ready(session_id, selector):
+            return None, True
+        before = await self._run_json(*tab_args)
+        existing = {tab["tab_id"] for tab in before["tabs"]}
+        await self._run_json(
+            "click", "--selector", selector, "--session", session_id,
+        )
+        opened = {}
+        urls = set()
+        for _ in range(5):
+            after = await self._run_json(*tab_args)
+            observed = {tab["tab_id"]: str(tab.get("url") or "") for tab in after["tabs"] if tab["tab_id"] not in existing}
+            settled = bool(observed) and observed == opened
+            opened = observed
+            urls = {url for value in opened.values() if (url := normalize_source_url(value))}
+            if settled and all(normalize_source_url(value) for value in opened.values()):
+                break
+            await asyncio.sleep(self.poll_interval)
+        url = next(iter(urls)) if len(urls) == 1 else None
+        try:
+            for tab_id in reversed(opened):
+                await self._run_json("tab", "close", str(tab_id), "--session", session_id)
+        except RuntimeError as error:
+            answer_tab = self._session_tabs.get(session_id)
+            if answer_tab is None or "Actions require an owned task tab" not in str(error):
+                return url, False
+            try:
+                await self._run_json("tab", "select", str(answer_tab), "--session", session_id)
+            except (BrowserControlInterrupted, RuntimeError, asyncio.TimeoutError):
+                return url, False
+        except (BrowserControlInterrupted, asyncio.TimeoutError):
+            return url, False
+        return url, True
+
     async def _expand_grok_source_sections(self, session_id: str, expected_count: int) -> dict:
         """Grok hides search results in separate, lazily rendered accordions."""
         page: dict = {"panel_found": False, "cards": [], "collapsed_count": 0}
@@ -1596,38 +2137,24 @@ class BskCliClient:
 
     async def _collect_gemini_view_sources(self, session_id: str) -> list[dict]:
         """Read the answer's separate View sources sidebar, including scrolled cards."""
-        open_menu = (
-            "(() => { const sidebar = document.querySelector('context-sidebar .all-sources'); "
-            "if (sidebar?.getClientRects().length) return {sidebar_open:true}; "
-            "const buttons = [...document.querySelectorAll('button[aria-label]')]"
-            ".filter(node => node.getClientRects().length && "
-            "/Show more options|更多选项/i.test(node.getAttribute('aria-label') || '')); "
-            "const button = buttons.at(-1); if (!button) return {button_found:false}; "
-            "button.click(); return {button_found:true}; })()"
-        )
-        state = self._result_value(await self._run_json(
-            "evaluate", open_menu, "--session", session_id, timeout=30
-        ))
-        if not isinstance(state, dict) or not state.get("button_found") and not state.get("sidebar_open"):
+        observation = await self._run_json("observe", "--session", session_id, timeout=30)
+        controls = CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
+        menu_refs = [ref for ref, label in controls if label in {"Show more options", "更多选项"}]
+        if not menu_refs:
             return []
-        if not state.get("sidebar_open"):
-            open_sidebar = (
-                "(() => { const item = [...document.querySelectorAll('[role=menuitem]')]"
-                ".find(node => node.getClientRects().length && "
-                "/^View sources$|^查看来源$|^查看信源$/i.test((node.innerText || '').trim())); "
-                "if (!item) return {found:false}; item.click(); return {found:true}; })()"
-            )
-            result = {"found": False}
-            for _ in range(4):
-                result = self._result_value(await self._run_json(
-                    "evaluate", open_sidebar, "--session", session_id, timeout=30
-                ))
-                if isinstance(result, dict) and result.get("found"):
-                    break
-                await asyncio.sleep(self.poll_interval)
-            if not isinstance(result, dict) or not result.get("found"):
-                await self._run_json("press", "Escape", "--session", session_id, timeout=30)
-                return []
+        await self._run_json("press", "Enter", "--ref", menu_refs[-1], "--session", session_id, timeout=30)
+        for _ in range(4):
+            observation = await self._run_json("observe", "--session", session_id, timeout=30)
+            source_ref = next((
+                ref for ref, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
+                if label in {"View sources", "查看来源", "查看信源"}
+            ), None)
+            if source_ref:
+                await self._run_json("press", "Enter", "--ref", source_ref, "--session", session_id, timeout=30)
+                break
+            await asyncio.sleep(self.poll_interval)
+        else:
+            return []
 
         read_page = (
             "(() => { const panel = document.querySelector('context-sidebar .all-sources'); "
@@ -1649,7 +2176,7 @@ class BskCliClient:
                 page = self._result_value(await self._run_json(
                     "evaluate", read_page, "--session", session_id, timeout=30
                 ))
-                if isinstance(page, dict) and page.get("panel_found"):
+                if isinstance(page, dict) and page.get("panel_found") and page.get("cards"):
                     break
                 await asyncio.sleep(self.poll_interval)
             if not isinstance(page, dict) or not page.get("panel_found"):
@@ -2115,7 +2642,13 @@ class BrowserSkillAdapter(ProbeAdapter):
                     )
                 except RuntimeError as error:
                     diagnostic = str(error)
-                    if any(marker in diagnostic.casefold() for marker in (
+                    if platform == "gemini" and diagnostic.startswith("Gemini platform error:"):
+                        output = BrowserProbeOutput(
+                            failure=FailureKind.SEND_FAILED,
+                            diagnostic=diagnostic,
+                            retryable=False,
+                        )
+                    elif any(marker in diagnostic.casefold() for marker in (
                         "err_network_changed",
                         "session not registered",
                         "message textbox not found",
@@ -2136,7 +2669,8 @@ class BrowserSkillAdapter(ProbeAdapter):
                         pass
                     session_id = None
                 if (
-                    output.failure not in retryable
+                    not output.retryable
+                    or output.failure not in retryable
                     or attempt_index == max_attempts - 1
                 ):
                     break
@@ -2169,6 +2703,7 @@ class BrowserSkillAdapter(ProbeAdapter):
                     query_normalized=normalized.changed,
                 )
             return PlatformAttempt(
+                conversation_url=output.conversation_url,
                 locale_verified=locale_verified,
                 platform=platform,
                 adapter=self.name,
