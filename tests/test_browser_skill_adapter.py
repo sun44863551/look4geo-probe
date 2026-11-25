@@ -2016,7 +2016,7 @@ async def test_gemini_collects_every_visible_citation_dialog_source():
     assert status == SourceCaptureStatus.CAPTURED
     assert diagnostic is None
     assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 3
-    assert sum(call[:2] == ("press", "Escape") for call in client.calls) == 3
+    assert sum(call[:2] == ("press", "Escape") for call in client.calls) == 0
 
 
 @pytest.mark.asyncio
@@ -2755,3 +2755,81 @@ async def test_gemini_keeps_verified_sidebar_links_when_browser_control_is_inter
     }
     assert status == SourceCaptureStatus.FAILED
     assert "strict observation changed" in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_gemini_reads_direct_view_sources_control():
+    client = BskCliClient("81483588", poll_interval=0)
+    actions = []
+
+    async def run(*args, **kwargs):
+        actions.append(args[:4])
+        if args[0] == "observe":
+            return {"text": '@e1 button "Show more options"\n@e2 button "查看來源"'}
+        if args[0] == "evaluate":
+            return {"value": {"panel_found": True, "at_end": True,
+                              "cards": [{"url": "https://example.org/source"}]}}
+        return {"value": True}
+
+    client._run_json = run
+    assert await client._collect_gemini_view_sources("session") == [
+        {"url": "https://example.org/source"}
+    ]
+    assert [a for a in actions if a[0] == "press"] == [("press", "Enter", "--ref", "@e2")]
+
+
+@pytest.mark.asyncio
+async def test_gemini_binds_source_buttons_by_verified_label_between_dialogs():
+    class Client(GeminiMultiSourceClient):
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "observe":
+                offset = 60 + (self.focus_index + 1) * 10
+                return {"text": "\n".join(
+                    f'@e{offset + i} button "View source details for citation {i}"'
+                    for i in range(3)
+                )}
+            return await super()._run_json(*args, **kwargs)
+
+    client = Client()
+    assert len(await client._collect_gemini_source_cards("session")) == 3
+    assert [c[3] for c in client.calls if c[:2] == ("press", "Enter")] == [
+        '[data-look4geo-gemini-citation="0"]',
+        '[data-look4geo-gemini-citation="1"]',
+        '[data-look4geo-gemini-citation="2"]',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_browser_adapter_saves_private_source_evidence_for_partial_capture(tmp_path):
+    client = FakeBrowserClient(BrowserProbeOutput(
+        answer="Verified answer",
+        source_capture_status=SourceCaptureStatus.FAILED,
+        source_capture_diagnostic="unresolved citation",
+        source_evidence={"answer_links": [{"url": "https://example.org/article"}]},
+    ))
+    result = await BrowserSkillAdapter(client=client, artifact_root=tmp_path).run(
+        "gemini", ProbeRequest(prompt="A question")
+    )
+    path = Path(result.artifact_paths[0])
+    evidence = json.loads(path.read_text())
+    assert evidence["answer_links"] == [{"url": "https://example.org/article"}]
+    assert evidence["status"] == "failed"
+    assert path.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.asyncio
+async def test_gemini_keeps_earlier_inline_links_when_a_later_dialog_fails():
+    class Client(GeminiSidebarClient):
+        async def _source_panel_page(self, session_id, platform):
+            if self.focus_index > 0:
+                raise RuntimeError("source dialog changed")
+            return await super()._source_panel_page(session_id, platform)
+
+    sources, status, diagnostic = await Client()._collect_visible_sources("session", "gemini", [])
+    assert {s.url for s in sources} == {
+        "https://source-0.example/product",
+        "https://sidebar.example/first",
+        "https://sidebar.example/second",
+    }
+    assert status == SourceCaptureStatus.FAILED
+    assert diagnostic == "source dialog changed"

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +65,15 @@ _NEEDS_OBSERVATION_UNTARGETED = frozenset({"press", "click"})
 
 class BrowserControlInterrupted(Exception):
     """Do not fall back to another input action when ownership/effect is uncertain."""
+
+
+class GeminiSourceReadInterrupted(RuntimeError):
+    """Carry links that were verified before a Gemini panel stopped responding."""
+
+    def __init__(self, cards: list[dict], error: Exception):
+        super().__init__(str(error))
+        self.cards = cards
+        self.control_interrupted = isinstance(error, BrowserControlInterrupted)
 
 
 def _control_interruption(raw: bytes, message: str) -> bool:
@@ -411,6 +421,7 @@ class BrowserProbeOutput:
     sources: list[SourceRecord] = field(default_factory=list)
     source_capture_status: SourceCaptureStatus = SourceCaptureStatus.NONE_EXPOSED
     source_capture_diagnostic: str | None = None
+    source_evidence: dict = field(default_factory=dict)
     login_required: bool = False
     failure: FailureKind | None = None
     diagnostic: str | None = None
@@ -704,8 +715,14 @@ class BskCliClient:
                     args[0] in {"observe", "evaluate"}
                     and "document changed during observation; observe again" in last_error.casefold()
                 )
+                gemini_citation_not_dispatched = (
+                    args[:2] == ("press", "Enter")
+                    and any(token.startswith("[data-look4geo-gemini-citation=") for token in args)
+                    and "input clock changed before native dispatch" in last_error.casefold()
+                )
                 if attempt < attempts - 1 and (
-                    _RETRYABLE_RE.search(last_error) or navigation_disconnected or observation_invalidated
+                    _RETRYABLE_RE.search(last_error) or navigation_disconnected
+                    or observation_invalidated or gemini_citation_not_dispatched
                 ):
                     await asyncio.sleep(1.2)
                     continue
@@ -955,7 +972,13 @@ class BskCliClient:
                             )
                         )
                     except Exception as error:
-                        sources = []
+                        sources = merge_sources([
+                            record for link in answer_links
+                            if (record := self._source_record(
+                                link, role=SourceRole.CITED, origin=SourceEvidenceOrigin.ANSWER_DOM,
+                                excluded_domains=frozenset(config["excluded_source_domains"]),
+                            )) is not None
+                        ])
                         source_status = SourceCaptureStatus.FAILED
                         source_diagnostic = str(error)
                     try:
@@ -969,6 +992,7 @@ class BskCliClient:
                         sources=sources,
                         source_capture_status=source_status,
                         source_capture_diagnostic=source_diagnostic,
+                        source_evidence={"answer_links": answer_links} if platform in {"gemini", "chatgpt"} else {},
                     )
             else:
                 stable_rounds = 0
@@ -1747,8 +1771,13 @@ class BskCliClient:
         if platform == "gemini":
             diagnostics = []
             for collect in (self._collect_gemini_view_sources, self._collect_gemini_source_cards):
+                interrupted = False
                 try:
                     cards = await collect(session_id)
+                except GeminiSourceReadInterrupted as error:
+                    cards = error.cards
+                    diagnostics.append(str(error))
+                    interrupted = error.control_interrupted
                 except BrowserControlInterrupted as error:
                     return merge_sources(candidates), SourceCaptureStatus.FAILED, str(error)
                 except Exception as error:
@@ -1763,6 +1792,8 @@ class BskCliClient:
                     )
                     if record is not None:
                         candidates.append(record)
+                if interrupted:
+                    break
             sources = merge_sources(candidates)
             status = SourceCaptureStatus.NONE_EXPOSED
             if diagnostics:
@@ -1917,7 +1948,7 @@ class BskCliClient:
         for index in range(count):
             target = targets[index] if index < len(targets) else {}
             direct = normalize_source_url(str(target.get("href") or ""))
-            if target.get("link_preview") and direct in known_urls and not target.get("expects_more"):
+            if direct and direct in known_urls and not target.get("expects_more"):
                 continue
             if "href" in target and not target["href"]:
                 grouped, complete, interrupted = await self._collect_chatgpt_source_group(
@@ -1950,7 +1981,12 @@ class BskCliClient:
                         break
                     await asyncio.sleep(self.poll_interval)
             if found:
-                cards.extend(found)
+                cards.extend({**link, "inline_citation": True} for link in found)
+                await self._run_json(
+                    "evaluate", "(() => { " + scope + f"const t=triggers[{index}]; "
+                    "if(t?.getAttribute('aria-expanded')==='true')t.click(); return true; })()",
+                    "--session", session_id, timeout=30,
+                )
             else:
                 # An inline link can also have a hover preview. If that exact
                 # citation is already captured, an unavailable preview does
@@ -1974,11 +2010,14 @@ class BskCliClient:
                 "--session", session_id,
             ))
             selector = f'[data-look4geo-source-group="{index}"]'
-            if group_found is not True or not await self._chatgpt_source_target_ready(session_id, selector):
+            if group_found is not True:
                 return cards, False, False
-            await self._run_json("hover", "--selector", selector, "--settle", "500ms", "--session", session_id)
+            await self._run_json("scroll-to", "--selector", selector, "--session", session_id)
+            if not await self._chatgpt_source_target_ready(session_id, selector):
+                return cards, False, False
             for _ in range(2):
-                await self._run_json("click", "--selector", selector, "--session", session_id)
+                await self._run_json("press", "Enter", "--selector", selector, "--session", session_id)
+                await asyncio.sleep(self.poll_interval + 0.5)
                 expanded = self._result_value(await self._run_json(
                     "evaluate", prefix + "return t?.getAttribute('aria-expanded')==='true'; })()",
                     "--session", session_id,
@@ -2007,7 +2046,40 @@ class BskCliClient:
             cards.extend({**link, "inline_citation": True} for link in panel["links"])
             complete = len(panel["links"]) + len(panel["buttons"]) >= expected_count
             for card_index, button in enumerate(panel["buttons"]):
-                url, cleaned = await self._chatgpt_source_button_url(session_id, f"{index}-{card_index}")
+                url, cleaned = None, True
+                for activation in range(3):
+                    expanded = self._result_value(await self._run_json(
+                        "evaluate", prefix + "return t?.getAttribute('aria-expanded')==='true'; })()",
+                        "--session", session_id,
+                    ))
+                    if expanded is not True:
+                        await self._run_json("press", "Enter", "--selector", selector, "--session", session_id)
+                    rebound = False
+                    for _ in range(4):
+                        rebound = self._result_value(await self._run_json(
+                            "evaluate", prefix +
+                            "const p=document.getElementById(t?.getAttribute('aria-controls')); "
+                            "if(!p?.getClientRects().length)return false; "
+                            "const buttons=[...p.querySelectorAll('button[data-d-component=pressable]')]; "
+                            f"buttons.forEach((b,i)=>b.setAttribute('data-look4geo-source-card','{index}-'+i));"
+                            f"return (buttons[{card_index}]?.innerText.trim().split('\\n')[1]||"
+                            f"buttons[{card_index}]?.getAttribute('aria-label'))==="
+                            + json.dumps(button["title"]) + "; })()",
+                            "--session", session_id,
+                        ))
+                        if rebound is True:
+                            break
+                        await asyncio.sleep(self.poll_interval)
+                    if rebound is not True:
+                        continue
+                    try:
+                        url, cleaned = await self._chatgpt_source_button_url(session_id, f"{index}-{card_index}")
+                        break
+                    except RuntimeError as error:
+                        # A missing selector failed before dispatch. Refresh its
+                        # parent popover, without replaying an uncertain input.
+                        if "not_found: selector" not in str(error) or activation == 2:
+                            raise
                 if url:
                     cards.append({"url": url, "title": button["title"], "inline_citation": True})
                 else:
@@ -2040,17 +2112,10 @@ class BskCliClient:
     async def _chatgpt_source_button_url(self, session_id: str, card_id: str) -> tuple[str | None, bool]:
         tab_args = ("tab", "list", "--scope", "agent", "--session", session_id)
         selector = f'[role=dialog][data-state=open] [data-look4geo-source-card="{card_id}"]'
-        await self._run_json(
-            "evaluate", "document.querySelector(" + json.dumps(selector) +
-            ")?.scrollIntoView({block:'nearest',behavior:'instant'}) ?? null",
-            "--session", session_id,
-        )
-        if not await self._chatgpt_source_target_ready(session_id, selector):
-            return None, True
         before = await self._run_json(*tab_args)
         existing = {tab["tab_id"] for tab in before["tabs"]}
         await self._run_json(
-            "click", "--selector", selector, "--session", session_id,
+            "press", "Enter", "--selector", selector, "--session", session_id,
         )
         opened = {}
         urls = set()
@@ -2106,55 +2171,87 @@ class BskCliClient:
         return page
 
     async def _collect_gemini_source_cards(self, session_id: str) -> list[dict]:
-        observation = await self._run_json(
-            "observe", "--session", session_id, timeout=30
-        )
-        source_refs = [
-            ref
-            for ref, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
-            if any(text in label for text in ("View source details", "查看引用来源详情", "查看来源"))
+        observation = await self._run_json("observe", "--session", session_id, timeout=30)
+        labels = [
+            re.sub(r"\s+\[(?:has-submenu|expanded)\]$", "", label)
+            for _, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
+            if any(text in label for text in ("View source details", "查看引用来源详情", "查看引用來源詳情"))
         ]
-        cards: list[dict] = []
-        for index, source_ref in enumerate(source_refs):
-            await self._run_json(
-                "press", "Enter", "--ref", source_ref,
+        if observation.get("truncated"):
+            labels = self._result_value(await self._run_json(
+                "evaluate",
+                "Array.from(document.querySelectorAll('button[aria-label]'))"
+                ".filter(b => b.getClientRects().length)"
+                ".map(b => b.getAttribute('aria-label'))"
+                ".filter(label => /View source details|查看引用来源详情|查看引用來源詳情/.test(label))",
                 "--session", session_id, timeout=30,
-            )
-            panel_page: dict = {"panel_found": False, "cards": []}
-            for _ in range(4):
-                panel_page = await self._source_panel_page(session_id, "gemini")
-                if panel_page.get("panel_found"):
-                    break
-                await asyncio.sleep(self.poll_interval)
-            if not panel_page.get("panel_found"):
-                raise RuntimeError(f"Gemini source dialog {index + 1} did not open")
-            dialog_cards = list(panel_page.get("cards", []))
-            if not dialog_cards:
-                raise RuntimeError(f"Gemini source dialog {index + 1} opened but no source links were read")
-            cards.extend(dialog_cards)
-            await self._run_json("press", "Escape", "--session", session_id, timeout=30)
+            ))
+            if not isinstance(labels, list):
+                raise RuntimeError("Gemini citation controls could not be fully observed")
+        cards: list[dict] = []
+        try:
+            for index, label in enumerate(labels):
+                selector = f'[data-look4geo-gemini-citation="{index}"]'
+                bind = (
+                    "(() => { const buttons = [...document.querySelectorAll('button[aria-label]')]"
+                    ".filter(b => b.getClientRects().length && "
+                    "/View source details|查看引用来源详情|查看引用來源詳情/.test(b.getAttribute('aria-label') || '')); "
+                    f"const button=buttons[{index}]; "
+                    "if(!button || button.getAttribute('aria-label') !== " + json.dumps(label) + ") return false; "
+                    f"button.setAttribute('data-look4geo-gemini-citation','{index}'); return true; }})()"
+                )
+                if self._result_value(await self._run_json(
+                    "evaluate", bind, "--session", session_id, timeout=30
+                )) is not True:
+                    raise RuntimeError("Gemini citation controls changed before opening a source dialog")
+                await self._run_json(
+                    "press", "Enter", "--selector", selector, "--session", session_id, timeout=30
+                )
+                panel_page: dict = {"panel_found": False, "cards": []}
+                for _ in range(4):
+                    panel_page = await self._source_panel_page(session_id, "gemini")
+                    if panel_page.get("panel_found") and panel_page.get("cards"):
+                        break
+                    await asyncio.sleep(self.poll_interval)
+                if not panel_page.get("panel_found"):
+                    raise RuntimeError(f"Gemini source dialog {index + 1} did not open")
+                dialog_cards = list(panel_page.get("cards", []))
+                if not dialog_cards:
+                    raise RuntimeError(f"Gemini source dialog {index + 1} opened but no source links were read")
+                cards.extend(dialog_cards)
+                # Opening the next citation changes the active source dialog. An
+                # untargeted Escape can invalidate shared control of the page.
+        except (RuntimeError, BrowserControlInterrupted, asyncio.TimeoutError) as error:
+            if not cards:
+                raise
+            raise GeminiSourceReadInterrupted(cards, error) from error
         return cards
 
     async def _collect_gemini_view_sources(self, session_id: str) -> list[dict]:
         """Read the answer's separate View sources sidebar, including scrolled cards."""
         observation = await self._run_json("observe", "--session", session_id, timeout=30)
         controls = CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
-        menu_refs = [ref for ref, label in controls if label in {"Show more options", "更多选项"}]
-        if not menu_refs:
-            return []
-        await self._run_json("press", "Enter", "--ref", menu_refs[-1], "--session", session_id, timeout=30)
-        for _ in range(4):
-            observation = await self._run_json("observe", "--session", session_id, timeout=30)
-            source_ref = next((
-                ref for ref, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
-                if label in {"View sources", "查看来源", "查看信源"}
-            ), None)
-            if source_ref:
-                await self._run_json("press", "Enter", "--ref", source_ref, "--session", session_id, timeout=30)
-                break
-            await asyncio.sleep(self.poll_interval)
+        source_labels = {"View sources", "查看来源", "查看信源", "查看來源"}
+        direct_ref = next((ref for ref, label in reversed(controls) if label in source_labels), None)
+        if direct_ref:
+            await self._run_json("press", "Enter", "--ref", direct_ref, "--session", session_id, timeout=30)
         else:
-            return []
+            menu_refs = [ref for ref, label in controls if label in {"Show more options", "更多选项", "更多選項"}]
+            if not menu_refs:
+                return []
+            await self._run_json("press", "Enter", "--ref", menu_refs[-1], "--session", session_id, timeout=30)
+            for _ in range(4):
+                observation = await self._run_json("observe", "--session", session_id, timeout=30)
+                source_ref = next((
+                    ref for ref, label in CONTROL_REF_PATTERN.findall(str(observation.get("text", "")))
+                    if label in source_labels
+                ), None)
+                if source_ref:
+                    await self._run_json("press", "Enter", "--ref", source_ref, "--session", session_id, timeout=30)
+                    break
+                await asyncio.sleep(self.poll_interval)
+            else:
+                return []
 
         read_page = (
             "(() => { const panel = document.querySelector('context-sidebar .all-sources'); "
@@ -2196,14 +2293,20 @@ class BskCliClient:
                 raise RuntimeError("Gemini Sources sidebar did not reach the end")
             if not cards:
                 raise RuntimeError("Gemini Sources sidebar opened but no source links were read")
-            return list({str(card.get("url") or ""): card for card in cards}.values())
-        finally:
-            close_sidebar = (
-                "(() => { const sidebar = document.querySelector('context-sidebar'); "
-                "const button = sidebar?.querySelector('button[aria-label=\"Close sidebar\"]'); "
-                "if (button?.getClientRects().length) button.click(); return true; })()"
-            )
+        except (RuntimeError, BrowserControlInterrupted, asyncio.TimeoutError) as error:
+            if not cards:
+                raise
+            raise GeminiSourceReadInterrupted(cards, error) from error
+        close_sidebar = (
+            "(() => { const sidebar = document.querySelector('context-sidebar'); "
+            "const button = sidebar?.querySelector('button[aria-label=\"Close sidebar\"]'); "
+            "if (button?.getClientRects().length) button.click(); return true; })()"
+        )
+        try:
             await self._run_json("evaluate", close_sidebar, "--session", session_id, timeout=30)
+        except (RuntimeError, BrowserControlInterrupted, asyncio.TimeoutError) as error:
+            raise GeminiSourceReadInterrupted(cards, error) from error
+        return list({str(card.get("url") or ""): card for card in cards}.values())
 
     @staticmethod
     def _source_record(
@@ -2702,8 +2805,33 @@ class BrowserSkillAdapter(ProbeAdapter):
                     query_sent=normalized.sent,
                     query_normalized=normalized.changed,
                 )
+            artifact_paths = []
+            if output.source_evidence:
+                try:
+                    evidence_root = self.artifact_root / "_source_evidence"
+                    evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", dir=evidence_root, prefix=f"{platform}-", suffix=".json",
+                        delete=False, encoding="utf-8",
+                    ) as evidence:
+                        json.dump({
+                            "platform": platform,
+                            "conversation_url": output.conversation_url,
+                            "status": output.source_capture_status,
+                            "diagnostic": output.source_capture_diagnostic,
+                            "sources": [source.model_dump(mode="json") for source in output.sources],
+                            **output.source_evidence,
+                        }, evidence, ensure_ascii=False)
+                        artifact_paths.append(evidence.name)
+                except OSError as error:
+                    detail = f"Could not save local source evidence: {error.strerror}"
+                    output.source_capture_diagnostic = "; ".join(
+                        note for note in (output.source_capture_diagnostic, detail) if note
+                    )
+                    output.source_capture_status = SourceCaptureStatus.FAILED
             return PlatformAttempt(
                 conversation_url=output.conversation_url,
+                artifact_paths=artifact_paths,
                 locale_verified=locale_verified,
                 platform=platform,
                 adapter=self.name,

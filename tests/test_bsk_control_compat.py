@@ -190,6 +190,8 @@ async def test_navigation_does_not_wait_for_unrelated_resources_by_default(monke
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expects_more,expected", [(False, "captured"), (True, "failed")])
 async def test_chatgpt_unavailable_preview_is_not_a_missing_source_when_direct_link_was_captured(expects_more, expected):
+    page_reads = []
+
     class Client(BskCliClient):
         async def _run_json(self, *args, **kwargs):
             script = args[1]
@@ -199,6 +201,7 @@ async def test_chatgpt_unavailable_preview_is_not_a_missing_source_when_direct_l
                 ]}}
             if "t.click()" in script:
                 return {"value": True}
+            page_reads.append(script)
             return {"value": []}
 
     sources, status, diagnostic = await Client("81483588", poll_interval=0)._collect_visible_sources(
@@ -207,6 +210,7 @@ async def test_chatgpt_unavailable_preview_is_not_a_missing_source_when_direct_l
     assert [s.url for s in sources] == ["https://example.org/article"]
     assert status == expected
     assert bool(diagnostic) is expects_more
+    assert bool(page_reads) is expects_more
 
 
 @pytest.mark.asyncio
@@ -239,8 +243,8 @@ async def test_chatgpt_grouped_citation_resolves_source_button_through_owned_tab
                     if self.tab_polls > 1:
                         tabs.append({"tab_id": 3, "url": url})
                 return {"tabs": tabs}
-            if action == "click":
-                if "source-card" in str(args[2]):
+            if action in {"click", "press"}:
+                if "source-card" in str(args):
                     self.opened = True
                 return {"ok": True}
             if action == "hover":
@@ -248,6 +252,8 @@ async def test_chatgpt_grouped_citation_resolves_source_button_through_owned_tab
             script = args[1]
             if "return {count:triggers.length" in script:
                 return {"value": {"count": 1, "targets": [{"href": None, "expected_count": expected_count}]}}
+            if "buttons.forEach" in script:
+                return {"value": True}
             if "b.setAttribute('data-look4geo-source-card'" in script:
                 if not getattr(self, "panel_pending", False):
                     self.panel_pending = True
@@ -264,8 +270,8 @@ async def test_chatgpt_grouped_citation_resolves_source_button_through_owned_tab
     assert [s.url for s in sources] == ["https://www.rfc-editor.org/rfc/rfc9309.html"]
     assert sources[0].source_role.value == "cited"
     actions = [call[0] for call in client.calls]
-    assert actions.index("hover") < actions.index("click")
-    assert sum(call[0] == "click" for call in client.calls) == 2
+    assert actions.index("scroll-to") < actions.index("press")
+    assert sum(call[:2] == ("press", "Enter") for call in client.calls) == 2
     assert [call[2] for call in client.calls if call[:2] == ("tab", "close")] == (["3"] if close_denied else ["3", "2"])
     if close_denied:
         assert ("tab", "select", "1", "--session", "session") in client.calls
@@ -321,3 +327,46 @@ async def test_chatgpt_does_not_click_a_covered_citation_badge():
     assert cards == []
     assert not complete
     assert "click" not in client.actions
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_reopens_source_group_after_source_tab_dismisses_popover():
+    class Client(BskCliClient):
+        def __init__(self):
+            super().__init__("81483588", poll_interval=0)
+            self.expanded = False
+            self.activations = []
+
+        async def _chatgpt_source_target_ready(self, session_id, selector):
+            return True
+
+        async def _run_json(self, *args, **kwargs):
+            if args[:2] == ("press", "Enter"):
+                self.expanded = True
+                return {"ok": True}
+            if args[0] != "evaluate":
+                return {"ok": True}
+            script = args[1]
+            if "buttons.forEach" in script:
+                return {"value": self.expanded}
+            if "return t?.getAttribute" in script:
+                return {"value": self.expanded}
+            if "b.setAttribute('data-look4geo-source-card'" in script:
+                return {"value": {"links": [], "buttons": [
+                    {"title": "Source one"}, {"title": "Source two"},
+                ]}}
+            return {"value": True}
+
+        async def _chatgpt_source_button_url(self, session_id, card_id):
+            assert self.expanded
+            self.activations.append(card_id)
+            self.expanded = False
+            return f"https://example.org/{card_id}", True
+
+    client = Client()
+    cards, complete, interrupted = await client._collect_chatgpt_source_group(
+        "session", "const triggers=[]; ", 0, 2
+    )
+    assert client.activations == ["0-0", "0-1"]
+    assert len(cards) == 2
+    assert complete and not interrupted
