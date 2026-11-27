@@ -142,6 +142,9 @@ class FakeLocator:
     def last(self):
         return self
 
+    async def all(self):
+        return []
+
     async def count(self):
         if 'Google Account:' in self.selector:
             return 1 if self.page.signed_in else 0
@@ -911,3 +914,40 @@ async def test_adapter_records_none_exposed_separately_from_answer_success(tmp_p
     assert attempt.status == JobStatus.SUCCEEDED
     assert attempt.source_capture_status == SourceCaptureStatus.NONE_EXPOSED
     assert attempt.sources == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['input', 'send'])
+async def test_camoufox_blocks_work_before_input_or_send(tmp_path, stage):
+    from look4geo_probe.sampling_modes import SamplingModeError
+    page = FakePage()
+    driver = GeminiPageDriver(page)
+    async def blocked():
+        raise SamplingModeError('Sampling mode blocked: work/Computer active')
+    driver._assert_non_work_mode = blocked
+    if stage == 'input':
+        result = await driver.probe('question', 2, tmp_path)
+        assert result.failure == FailureKind.SEND_FAILED
+        assert page.fill_calls == 0
+    else:
+        with pytest.raises(SamplingModeError):
+            await driver._send('question')
+    assert not page.sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('label', ['Work', 'Computer', '工作模式'])
+async def test_camoufox_mode_guard_inspects_selected_controls(label):
+    from look4geo_probe.sampling_modes import SamplingModeError
+    class Control:
+        async def get_attribute(self, name):
+            return label
+    class Selected:
+        async def all(self):
+            return [Control()]
+    class Page:
+        def locator(self, selector):
+            assert 'aria-pressed="true"' in selector
+            return Selected()
+    with pytest.raises(SamplingModeError):
+        await GeminiPageDriver(Page())._assert_non_work_mode()

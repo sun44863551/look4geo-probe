@@ -110,8 +110,10 @@ def build_adapters(root: Path, runtime: str = "default") -> dict[str, object]:
 
 def build_service(project_root: Path | None = None) -> ProbeService:
     root = project_root or Path(__file__).resolve().parents[2]
+    run_root_override = os.environ.get("LOOK4GEO_RUN_ROOT")
+    run_root = Path(run_root_override).expanduser().resolve() if run_root_override else root
     platforms, routing = load_configuration(root / "config")
     router = Router(platforms, routing)
-    adapters = build_adapters(root, os.environ.get("LOOK4GEO_RUNTIME", "default").casefold())
-    store = ProbeStore(root / "data/probe.sqlite3", root / "data/runs")
+    adapters = build_adapters(run_root, os.environ.get("LOOK4GEO_RUNTIME", "default").casefold())
+    store = ProbeStore(run_root / "data/probe.sqlite3", run_root / "data/runs")
     return ProbeService(router, store, adapters)

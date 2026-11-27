@@ -117,3 +117,29 @@ def doctor(json_output: bool = typer.Option(False, "--json")) -> None:
     _print(payload, json_output)
     if not payload["summary"]["ok"]:
         raise typer.Exit(1)
+
+
+@app.command("batch")
+def batch(
+    spec_path: Path = typer.Option(..., "--spec", exists=True, dir_okay=False),
+    output: Path | None = typer.Option(None, "--output"),
+    plan: bool = typer.Option(False, "--plan"),
+    retry_failed: bool = typer.Option(False, "--retry-failed", help="Retry reviewed failures, retaining original records; never retry unresolved pending actions"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Collect one customer's questions using an explicit multi-instance schedule."""
+    from .batch import BatchRunner, BatchSpec
+    try:
+        spec = BatchSpec.model_validate(jsonlib.loads(spec_path.read_text(encoding="utf-8")))
+        if plan:
+            _print(spec.plan(), json_output)
+            return
+        if output is None:
+            raise ValueError("--output is required for collection")
+        report = asyncio.run(BatchRunner(spec, output, retry_failed=retry_failed).run())
+    except (ValueError, OSError) as error:
+        raise typer.BadParameter(str(error)) from error
+    _print({k:v for k,v in report.items() if k not in {"cells", "samples"}} |
+           {"report": str((output / "report.json").resolve())}, json_output)
+    if report["status"] != "succeeded":
+        raise typer.Exit(1)

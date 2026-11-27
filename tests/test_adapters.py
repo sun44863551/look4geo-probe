@@ -193,3 +193,16 @@ async def test_adapter_chain_hard_timeout_falls_back_and_classifies_timeout():
     assert result.adapter == "ai_search_hub"
     assert "browser_skill: hard timeout" in (result.diagnostic or "")
     assert primary.calls == fallback.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mode_policy_failure_never_uses_fallback():
+    class BlockedAdapter(ResultAdapter):
+        async def run(self, platform, request):
+            result = await super().run(platform, request)
+            return result.model_copy(update={'diagnostic': 'Sampling mode blocked: work/Computer active'})
+    primary = BlockedAdapter('browser_skill', JobStatus.FAILED, failure=FailureKind.SEND_FAILED)
+    fallback = ResultAdapter('camoufox_gemini', JobStatus.SUCCEEDED)
+    result = await AdapterChain('gemini', [primary, fallback]).run('gemini', ProbeRequest(prompt='question'))
+    assert result.failure == FailureKind.SEND_FAILED
+    assert fallback.calls == 0

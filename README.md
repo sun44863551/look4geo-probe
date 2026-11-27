@@ -32,6 +32,10 @@ Platform selection is explicit and remains under the caller's control. The curre
 
 Qwen is not an active platform in the current unified configuration. The BrowserSkill Gemini adapter defaults to Flash. Set `LOOK4GEO_GEMINI_MODE=auto` in `config/local.env` for accounts with the Gemini Auto web mode. Set `LOOK4GEO_GEMINI_MODE=flash-lite` explicitly to sample Flash-Lite. The adapter verifies the configured mode before submission. If the signed-in account opens Gemini at a URL such as `/u/1/app`, set `LOOK4GEO_GEMINI_ACCOUNT_SLOT=1` in the same file. Record the mode and account used with each baseline. API-based model answers are outside the probe's measurement path.
 
+All sampling uses ordinary chat/search. Work and Computer modes are forbidden. Browser drivers check selected mode controls before entering and sending a prompt; a blocked mode stops collection without adapter fallback. Perplexity must explicitly confirm ordinary Search, and Doubao must confirm conversation mode. See [the sampling policy and repair evidence](docs/no-work-sampling-2026-11-27.md). Restart an already-running MCP server to load these code changes.
+
+For customer-scoped multi-instance collection, `probe batch` supports `same-platform` (replicate each platform/question across instances) and `platform-per-instance` (fixed platform assignments running independently). See [configuration, execution and recovery](docs/multi-instance-batches.md).
+
 ## Architecture
 
 The project exposes one local service through two compatible entry points:

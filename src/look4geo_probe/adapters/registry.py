@@ -105,6 +105,8 @@ class AdapterChain(ProbeAdapter):
                         update={"diagnostic": "fallback after " + "; ".join(failures)}
                     )
                 return attempt
+            if (attempt.diagnostic or "").startswith("Sampling mode blocked:"):
+                return attempt
             if attempt.failure in {
                 FailureKind.LOGIN_REQUIRED,
                 FailureKind.RATE_LIMITED,

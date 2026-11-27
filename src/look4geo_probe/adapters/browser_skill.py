@@ -25,6 +25,7 @@ from ..models import (
     SourceRole,
 )
 from ..sources import citations_from_sources, merge_sources, normalize_source_url
+from ..sampling_modes import ACTIVE_MODE_SELECTOR, SamplingModeError, is_forbidden_mode_label
 from ..validity import CONTAMINATION_RE
 
 # 2026-11-01: bsk >= 0.4.0 (protocol 1.7) 起，下列「写操作」必须带 cooperate 上下文。
@@ -204,8 +205,8 @@ PLATFORMS = {
     },
     "perplexity": {
         "url": "https://www.perplexity.ai/",
-        "textbox": ("输入 @ 以使用连接器", "问任何事情..."),
-        "composer_selector": 'div[contenteditable="true"]',
+        "textbox": ("输入 @ 以使用连接器", "问任何事情...", "Ask anything", "Ask anything…", "Ask anything...", "Type @ for connectors"),
+        "composer_selector": 'div[contenteditable="true"][role="textbox"]',
         "login_markers": ("登录", "继续使用"),
         "conversation_marker": "/search/",
         "answer_selector": '[class*="prose"]',
@@ -267,6 +268,12 @@ PLATFORMS["yuanbao"].update(
         "excluded_source_domains": ("yuanbao.tencent.com",),
     }
 )
+for _domestic in ("doubao", "deepseek", "yuanbao", "baidu"):
+    PLATFORMS[_domestic].update(
+        navigate_wait_until="domcontentloaded",
+        navigate_timeout="60s",
+    )
+
 PLATFORMS["baidu"].update(
     {
         "source_trigger_labels": ("来源", "参考资料"),
@@ -367,6 +374,8 @@ RATE_LIMIT_MARKERS = (
     "升级到 supergrok",
     "升级至 supergrok",
 )
+GEMINI_STREAM_STALL_SECONDS = 120.0
+
 GEMINI_REFUSAL_MARKERS = (
     "i'm having a hard time fulfilling your request",
     "i am having a hard time fulfilling your request",
@@ -383,6 +392,10 @@ GEMINI_TRANSIENT_ERROR_MARKERS = (
     "there was an error generating a response",
 )
 HUMAN_VERIFICATION_MARKERS = (
+    "Performing security verification",
+    "This website uses a security service to protect against malicious bots",
+    "Verify you are human",
+    "Verifying you are human",
     "请确认你的年龄以继续",
     "你出生于哪一年",
     "通过验证以确保正常访问",
@@ -395,6 +408,12 @@ HUMAN_VERIFICATION_MARKERS = (
 PREAMBLE_PATTERN = re.compile(
     r"^(?:我会|我先|我将|我来|I(?:['’]?ll| will)\b|Let me\b)", re.I
 )
+DOUBAO_RESEARCH_PROGRESS_PATTERN = re.compile(
+    r"我(?:再|补充|还要|还需)[^。！？\n]{0,100}"
+    r"(?:检索|搜索|核实|核验|确认|精读|深读|深入读|深挖|补充)"
+    r"|让我进一步[^。！？\n]{0,80}(?:检索|搜索|核实|核验|确认|精读|深读|深挖)"
+    r"|^再补一轮"
+)
 
 
 def command_error_detail(stdout: bytes, stderr: bytes) -> str:
@@ -405,8 +424,10 @@ def command_error_detail(stdout: bytes, stderr: bytes) -> str:
     if stdout_text:
         try:
             payload = json.loads(stdout_text)
-            code = str(payload.get("code") or "bsk_error")
-            message = str(payload.get("message") or payload.get("hint") or "command failed")
+            error = payload.get("error")
+            error_detail = error.get("message") if isinstance(error, dict) else error
+            code = str(payload.get("code") or (error.get("code") if isinstance(error, dict) else None) or "bsk_error")
+            message = str(payload.get("message") or error_detail or payload.get("error_text") or payload.get("hint") or "command failed")
             return f"{code}: {message}"
         except (json.JSONDecodeError, AttributeError):
             return stdout_text
@@ -513,7 +534,10 @@ def is_incomplete_preamble(platform: str, answer: str) -> bool:
     return (
         platform in {"chatgpt", "doubao", "yuanbao"}
         and len(answer) < 300
-        and bool(PREAMBLE_PATTERN.match(answer))
+        and bool(
+            PREAMBLE_PATTERN.match(answer)
+            or (platform == "doubao" and DOUBAO_RESEARCH_PROGRESS_PATTERN.search(answer))
+        )
     )
 
 
@@ -578,6 +602,8 @@ class BskCliClient:
         self.browser_instance_id = browser_instance_id
         self.poll_interval = poll_interval
         self._session_tabs: dict[str, int] = {}
+        self._stream_read_sessions: set[str] = set()
+        self._sampling_mode_checks: dict[str, list[dict]] = {}
         self._buyer_locales: dict[str, str] = {}
         self._locale_verified: dict[str, bool] = {}
 
@@ -707,6 +733,11 @@ class BskCliClient:
                 last_error = command_error_detail(stdout, stderr)
                 if _control_interruption(stdout, last_error) or _control_interruption(stderr, last_error):
                     raise BrowserControlInterrupted(last_error)
+                if (args[0] == "evaluate" and "const answerText =" in args[1]
+                        and any(json.dumps(PLATFORMS[name]["answer_selector"]) in args[1]
+                                for name in ("perplexity", "gemini"))
+                        and "strict observation changed" in last_error.casefold()):
+                    raise RuntimeError(last_error)
                 # 上下文失效 / 页面自行变化 / 扩展瞬时抖动 ⇒ 重新 sync 后重放同一动作
                 navigation_disconnected = (
                     navigation_host == "chatgpt.com" and "net::ERR_CONNECTION_CLOSED" in last_error
@@ -720,9 +751,22 @@ class BskCliClient:
                     and any(token.startswith("[data-look4geo-gemini-citation=") for token in args)
                     and "input clock changed before native dispatch" in last_error.casefold()
                 )
+                try:
+                    failure_state = json.loads(stdout).get("data") or {}
+                except (ValueError, AttributeError):
+                    failure_state = {}
+                settling_not_dispatched = (
+                    failure_state.get("dispatched") is False
+                    and "previous operation is still settling" in last_error.casefold()
+                )
+                selector_read_changed = (
+                    args[0] == "read" and "--selector" in args
+                    and "the read document or target changed; inspect it again" in last_error.casefold()
+                )
                 if attempt < attempts - 1 and (
                     _RETRYABLE_RE.search(last_error) or navigation_disconnected
                     or observation_invalidated or gemini_citation_not_dispatched
+                    or settling_not_dispatched or selector_read_changed
                 ):
                     await asyncio.sleep(1.2)
                     continue
@@ -760,6 +804,37 @@ class BskCliClient:
             raise
         return session_id
 
+    async def _navigate(self, session_id: str, url: str, *, timeout: float) -> dict | list:
+        # Retry only a pre-submission transport failure, never input/send actions
+        # or permission errors. A retry cannot create a duplicate submitted turn.
+        config = next((c for c in PLATFORMS.values() if c["url"] == url), None)
+        nav_args: tuple[str, ...] = ("navigate", url, "--session", session_id)
+        if config and config.get("navigate_wait_until"):
+            # SPA 的 load 事件常年不触发，等 domcontentloaded 并放宽超时
+            nav_args = nav_args + (
+                "--wait-until", str(config["navigate_wait_until"]),
+                "--timeout", str(config.get("navigate_timeout", "60s")),
+            )
+        for attempt in range(2):
+            try:
+                return await self._run_json(*nav_args, timeout=timeout)
+            except RuntimeError as error:
+                if 'timed out waiting for lifecycle' in str(error):
+                    # Gemini's peripheral resources may never finish loading
+                    # although its real composer is already interactive. Never
+                    # accept a Chrome error page or an unrelated login redirect.
+                    if config and (await self._current_url(session_id)).rstrip("/") == url.rstrip("/"):
+                        if await self._wait_composer_available(
+                            session_id, config["composer_selector"], rounds=3
+                        ):
+                            return {"final_url": url, "navigation_warning": str(error)}
+                if attempt or not any(marker in str(error) for marker in (
+                    "ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET", "ERR_NETWORK_CHANGED",
+                )):
+                    raise
+                await asyncio.sleep(self.poll_interval)
+        raise AssertionError("unreachable")
+
     async def probe(
         self, session_id: str, platform: str, prompt: str, timeout: float
     ) -> BrowserProbeOutput:
@@ -775,11 +850,22 @@ class BskCliClient:
         if platform == "chatgpt":
             await self._set_chatgpt_english_locale(session_id)
             navigation_wait = ("--wait-until", "commit")
-        navigation = await self._run_json(
-            "navigate", url, *navigation_wait, "--session", session_id, timeout=timeout
-        )
+        if platform in {"doubao", "deepseek", "yuanbao", "baidu"}:
+            navigation = await self._navigate(session_id, url, timeout=timeout)
+        else:
+            navigation = await self._run_json(
+                "navigate", url, *navigation_wait, "--session", session_id, timeout=timeout
+            )
         if isinstance(navigation, dict) and navigation.get("tab_id") is not None:
             self._session_tabs[session_id] = int(navigation["tab_id"])
+        if platform == "gemini" and isinstance(navigation, dict):
+            destination = urlsplit(str(navigation.get("final_url") or ""))
+            if destination.hostname == "myaccount.google.com" and destination.path.startswith("/restrictions/"):
+                return BrowserProbeOutput(
+                    login_required=True,
+                    retryable=False,
+                    diagnostic="Google service restriction: review Gemini access in the dedicated browser; no prompt sent",
+                )
         if platform == "chatgpt" and not await self._chatgpt_english_locale_ready(session_id):
             return BrowserProbeOutput(
                 failure=FailureKind.EXTRACTION_FAILED,
@@ -793,12 +879,26 @@ class BskCliClient:
         if page_requires_human_verification({"page_text": page_text}):
             return BrowserProbeOutput(
                 login_required=True,
-                diagnostic="human verification required",
+                diagnostic=(
+                    "Doubao requires manual picture verification in its browser profile"
+                    if platform == "doubao" and any(marker in page_text for marker in (
+                        "请选择所有符合上文描述的图片", "并拖拽到下方",
+                    )) else "human verification required"
+                ),
             )
         if any(
             marker in page_text for marker in config.get("blocking_login_markers", ())
         ):
             return BrowserProbeOutput(login_required=True)
+        if platform == "doubao":
+            if not await self._ensure_doubao_conversation(session_id):
+                return BrowserProbeOutput(
+                    failure=FailureKind.SEND_FAILED,
+                    diagnostic="Doubao new conversation mode could not be confirmed; no prompt sent",
+                )
+            # Creating a conversation remounts the editor and invalidates refs.
+            observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
+            page_text = str(observation.get("text", ""))
         textbox_ref = self._find_textbox_ref(page_text, config["textbox"])
         if not textbox_ref and not await self._wait_composer_available(
             session_id, config["composer_selector"]
@@ -814,14 +914,19 @@ class BskCliClient:
         ):
             return BrowserProbeOutput(
                 failure=FailureKind.SEND_FAILED,
-                diagnostic="Perplexity standard search mode could not be confirmed",
+                diagnostic="Sampling mode blocked: Perplexity standard Search mode could not be confirmed",
+                retryable=False,
             )
         if platform == "gemini":
             mode_confirmed = False
+            mode_error = None
             for _ in range(3):
                 try:
                     mode_confirmed = await self._ensure_gemini_mode(session_id)
-                except RuntimeError:
+                except BrowserControlInterrupted:
+                    raise
+                except RuntimeError as error:
+                    mode_error = str(error)
                     mode_confirmed = False
                 if mode_confirmed:
                     break
@@ -829,17 +934,20 @@ class BskCliClient:
             if not mode_confirmed:
                 return BrowserProbeOutput(
                     failure=FailureKind.SEND_FAILED,
-                    diagnostic="Configured Gemini mode could not be confirmed",
+                    diagnostic=("Configured Gemini mode could not be confirmed"
+                                + (f": {mode_error}" if mode_error else "")),
                 )
 
+        await self._assert_non_work_mode(session_id, platform, stage="before_prompt")
         baseline_page = await self._answer_page(session_id, config["answer_selector"])
         baseline = [str(value) for value in baseline_page.get("answers", [])]
-        await self._enter_prompt(session_id, platform, textbox_ref, prompt, timeout=timeout)
+        await self._enter_prompt_checked(session_id, platform, textbox_ref, prompt, timeout=timeout)
         if not await self._wait_submission_ready(session_id, platform):
             return BrowserProbeOutput(
                 failure=FailureKind.SEND_FAILED,
                 diagnostic="composer remained disabled before submission",
             )
+        await self._assert_non_work_mode(session_id, platform, stage="before_submit")
         await self._submit_prompt(session_id, platform, textbox_ref, timeout=timeout)
 
         deadline = asyncio.get_running_loop().time() + timeout
@@ -848,6 +956,29 @@ class BskCliClient:
         saw_answer_candidate = False
         saw_attachment_only_answer = False
         gemini_reply_announced = False
+        current_text = ""
+        progress_signature = None
+        last_progress = asyncio.get_running_loop().time()
+        page = {}
+
+        async def gemini_failure(kind, diagnostic):
+            try:
+                conversation_url = await self._current_url(session_id)
+            except RuntimeError:
+                conversation_url = None
+            failure_text = select_main_answer("gemini", [
+                text for text in answers_after_baseline(
+                    [str(value) for value in page.get("answers", [])], baseline
+                ) if not is_prompt_echo(text, prompt)
+            ])
+            return BrowserProbeOutput(
+                answer=failure_text, conversation_url=conversation_url,
+                failure=kind, diagnostic=diagnostic,
+                source_capture_status=SourceCaptureStatus.FAILED,
+                source_capture_diagnostic="Incomplete Gemini response; retained as failure evidence only",
+                source_evidence={"failure_page": page},
+            )
+
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(self.poll_interval)
             page = await self._answer_page(session_id, config["answer_selector"])
@@ -900,9 +1031,8 @@ class BskCliClient:
             if platform == "gemini" and any(
                 marker in page_text for marker in GEMINI_TRANSIENT_ERROR_MARKERS
             ):
-                return BrowserProbeOutput(
-                    failure=FailureKind.EXTRACTION_FAILED,
-                    diagnostic="Gemini returned a transient platform error",
+                return await gemini_failure(
+                    FailureKind.EXTRACTION_FAILED, "Gemini returned a transient platform error"
                 )
             candidates = [str(value) for value in page.get("answers", [])]
             delta = answers_after_baseline(candidates, baseline)
@@ -914,6 +1044,18 @@ class BskCliClient:
                     r"(?im)^\s*(?:Gemini replied|Gemini 已回复|Gemini 已回答)\s*$",
                     page_text,
                 ))
+            if platform == "gemini":
+                signature = (current_text, page.get("generating"), page_text)
+                now = asyncio.get_running_loop().time()
+                if signature != progress_signature:
+                    progress_signature, last_progress = signature, now
+                elif now - last_progress >= GEMINI_STREAM_STALL_SECONDS and (
+                    page.get("generating") or not current_text
+                ):
+                    return await gemini_failure(
+                        FailureKind.TIMEOUT,
+                        f"Gemini generation stalled without progress for {GEMINI_STREAM_STALL_SECONDS:g}s",
+                    )
             if not current_text:
                 continue
             if platform == "gemini":
@@ -933,16 +1075,14 @@ class BskCliClient:
             if platform == "gemini" and any(
                 marker in lowered for marker in GEMINI_TRANSIENT_ERROR_MARKERS
             ):
-                return BrowserProbeOutput(
-                    failure=FailureKind.EXTRACTION_FAILED,
-                    diagnostic="Gemini returned a transient platform error",
+                return await gemini_failure(
+                    FailureKind.EXTRACTION_FAILED, "Gemini returned a transient platform error"
                 )
             if platform == "gemini" and any(
                 marker in lowered for marker in GEMINI_REFUSAL_MARKERS
             ):
-                return BrowserProbeOutput(
-                    failure=FailureKind.EXTRACTION_FAILED,
-                    diagnostic="Gemini returned a refusal response",
+                return await gemini_failure(
+                    FailureKind.EXTRACTION_FAILED, "Gemini returned a refusal response"
                 )
             if "429" in lowered or "rate limit" in lowered or "请求过于频繁" in current_text:
                 return BrowserProbeOutput(
@@ -981,6 +1121,11 @@ class BskCliClient:
                         ])
                         source_status = SourceCaptureStatus.FAILED
                         source_diagnostic = str(error)
+                    if page.get("source_read_diagnostic"):
+                        source_status = SourceCaptureStatus.FAILED
+                        source_diagnostic = "; ".join(note for note in (
+                            source_diagnostic, page["source_read_diagnostic"]
+                        ) if note)
                     try:
                         conversation_url = await self._current_url(session_id)
                     except Exception:
@@ -992,7 +1137,10 @@ class BskCliClient:
                         sources=sources,
                         source_capture_status=source_status,
                         source_capture_diagnostic=source_diagnostic,
-                        source_evidence={"answer_links": answer_links} if platform in {"gemini", "chatgpt"} else {},
+                        source_evidence={
+                            **({"answer_links": answer_links} if platform in {"gemini", "chatgpt"} else {}),
+                            "sampling_mode_checks": list(self._sampling_mode_checks.get(session_id, [])),
+                        },
                     )
             else:
                 stable_rounds = 0
@@ -1010,6 +1158,12 @@ class BskCliClient:
                 source_capture_diagnostic="No visible answer to associate with sources",
                 retryable=False,
             )
+        if platform == "gemini":
+            return await gemini_failure(
+                FailureKind.EXTRACTION_FAILED if saw_answer_candidate else FailureKind.TIMEOUT,
+                "new answer candidates never became valid and stable" if saw_answer_candidate
+                else f"no new answer matched {config['answer_selector']} within {timeout:g}s",
+            )
         if saw_answer_candidate:
             return BrowserProbeOutput(
                 failure=FailureKind.EXTRACTION_FAILED,
@@ -1024,6 +1178,72 @@ class BskCliClient:
             diagnostic=f"no new answer matched {config['answer_selector']} within {timeout:g}s",
         )
 
+    async def _doubao_dialogue_ready(
+        self, session_id: str, *, require_empty: bool = False
+    ) -> bool:
+        # Both work and dialogue use /chat and contenteditable editors. The
+        # composer mode, not the URL or presence of a textbox, is authoritative.
+        expression = (
+            "(() => { const visible = n => n && n.getClientRects().length > 0; "
+            "const mode = document.querySelector('[data-testid=chat_input_action_mode]'); "
+            "const editor = document.querySelector(" + json.dumps(PLATFORMS["doubao"]["composer_selector"]) + "); "
+            "const work = [...document.querySelectorAll('button[data-active=true]')]"
+            ".some(n => visible(n) && (n.innerText || '').trim() === '工作'); "
+            "return Boolean(visible(mode) && (mode.innerText || '').trim() === '对话' "
+            "&& visible(editor) && !work"
+            + (" && !(editor.innerText || '').trim()" if require_empty else "")
+            + "); })()"
+        )
+        result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+        return self._result_value(result) is True
+
+    async def _ensure_doubao_conversation(self, session_id: str) -> bool:
+        observation = await self._run_json("observe", "--session", session_id, timeout=30)
+        # Match the actual dialogue label, allowing its displayed keyboard
+        # shortcut. Never select a generic first/new-task button.
+        ref = next((ref for ref, label in BUTTON_REF_PATTERN.findall(
+            str(observation.get("text", ""))
+        ) if re.match(r"^新对话(?:\s|$)", label)), None)
+        if not ref:
+            return False
+        await self._run_json("click", ref, "--session", session_id, timeout=30)
+        for _ in range(3):
+            if await self._doubao_dialogue_ready(session_id, require_empty=True):
+                return True
+            await asyncio.sleep(self.poll_interval)
+        return False
+
+    async def _enter_prompt_checked(
+        self, session_id: str, platform: str, textbox_ref: str | None,
+        prompt: str, *, timeout: float = 30.0,
+    ) -> None:
+        try:
+            await self._enter_prompt(session_id, platform, textbox_ref, prompt, timeout=timeout)
+        except BrowserControlInterrupted as error:
+            # Reconcile a possibly completed input; never replay it or ignore a
+            # Stop/unknown-effect error. Human control must first be handed back.
+            if "user activity revoked this action" not in str(error).casefold():
+                raise
+            context, _ = await self._cooperate_context(
+                session_id, timeout, self._session_tabs.get(session_id)
+            )
+            if not context:
+                raise error
+            current = await self._run_json(
+                "read", "--selector", PLATFORMS[platform]["composer_selector"],
+                "--fields-json", json.dumps([
+                    {"key": "text", "read": "text"},
+                    {"key": "value", "read": "value"},
+                ]), "--max-nodes", "2", "--session", session_id, timeout=timeout,
+            )
+            items = current.get("items", [])
+            if current.get("truncated") or len(items) != 1:
+                raise error
+            values = items[0].get("values", {})
+            text = values.get("value") if values.get("value") is not None else values.get("text")
+            if not isinstance(text, str) or text.strip() != prompt.strip():
+                raise error
+
     async def _enter_prompt(
         self,
         session_id: str,
@@ -1033,6 +1253,31 @@ class BskCliClient:
         *,
         timeout: float = 30.0,
     ) -> None:
+        if platform == "perplexity":
+            # The Search UI remounts its Lexical editor and now labels it with
+            # an ellipsis. Resolve the exact visible textbox, never a generic
+            # contenteditable or a hidden Work/Computer editor.
+            observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
+            ref = self._find_textbox_ref(str(observation.get("text", "")), PLATFORMS[platform]["textbox"])
+            if not ref:
+                raise SamplingModeError("Sampling mode blocked: ordinary Perplexity search textbox not confirmed")
+            entry_error = None
+            try:
+                await self._run_json("fill", ref, "--value", prompt, "--session", session_id, timeout=timeout)
+            except RuntimeError as error:
+                entry_error = error
+            current = await self._run_json(
+                "read", "--ref", ref, "--fields-json", json.dumps([{"key": "text", "read": "text"}]),
+                "--session", session_id, timeout=timeout,
+            )
+            items = current.get("items", [])
+            if (not current.get("truncated") and len(items) == 1
+                    and "text" not in items[0].get("redacted", [])
+                    and str(items[0].get("values", {}).get("text") or "").strip() == prompt.strip()):
+                return
+            if entry_error:
+                raise entry_error
+            raise RuntimeError("Perplexity prompt entry could not be verified from the observed textbox")
         if platform == "chatgpt":
             selector = PLATFORMS["chatgpt"]["composer_selector"]
             # 2026-11-06: bsk 0.4.2（扩展 protocol 1.8）引入 strict shared-control ——
@@ -1135,10 +1380,23 @@ class BskCliClient:
                     "click", selector, "--session", session_id, timeout=timeout
                 )
                 await asyncio.sleep(0.6)
-                await self._run_json(
-                    "fill", "--selector", selector, "--value", prompt,
-                    "--session", session_id, timeout=timeout,
-                )
+                try:
+                    await self._run_json(
+                        "fill", "--selector", selector, "--value", prompt,
+                        "--session", session_id, timeout=timeout,
+                    )
+                except RuntimeError as error:
+                    if not any(marker in str(error) for marker in ("target changed", "lost focus")):
+                        raise
+                    expression = (
+                        "(() => { const target = [...document.querySelectorAll(" + json.dumps(selector) + ")]"
+                        ".find(n => n.getClientRects().length); if (!target) return ''; target.focus(); "
+                        "const range = document.createRange(); range.selectNodeContents(target); "
+                        "const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); "
+                        "document.execCommand('insertText', false, " + json.dumps(prompt) + "); "
+                        "return target.innerText || ''; })()"
+                    )
+                    await self._run_json("evaluate", expression, "--session", session_id, timeout=timeout)
                 await asyncio.sleep(0.4)
                 await self._run_json(
                     "press", "space", "--selector", selector,
@@ -1272,19 +1530,10 @@ class BskCliClient:
         await self._run_json(
             "press", "Meta+A", "--selector", selector, "--session", session_id, timeout=timeout
         )
-        await self._run_json("press", "Backspace", "--session", session_id, timeout=timeout)
-        if platform == "perplexity":
-            try:
-                await self._run_json(
-                    "fill", "--selector", selector, "--no-clear", "--value", prompt,
-                    "--session", session_id, timeout=timeout
-                )
-                return
-            except RuntimeError as error:
-                if "fill could not verify the expected value" in str(error):
-                    value = await self._composer_text(session_id, selector)
-                    if value.strip() == prompt.strip():
-                        return
+        await self._run_json(
+            "press", "Backspace", "--selector", selector,
+            "--session", session_id, timeout=timeout,
+        )
         expression = (
             "(() => { const nodes = [...document.querySelectorAll("
             + json.dumps(selector)
@@ -1304,6 +1553,16 @@ class BskCliClient:
         if platform not in {"doubao", "baidu"}:
             return False
         markers = ("下载豆包电脑版", "下载电脑版 使用完整功能") if platform == "doubao" else ("全新上线任务模式",)
+        observation = await self._run_json("observe", "--session", session_id, timeout=30)
+        page_text = str(observation.get("text", ""))
+        if "dialog " in page_text and any(marker in page_text for marker in markers):
+            # The current promo exposes a native dismiss button while its
+            # innerText can be empty. Use the observed control, not a DOM guess.
+            dismiss_ref = next((ref for ref, label in BUTTON_REF_PATTERN.findall(page_text)
+                                if label in {"下次提醒我", "暂不体验", "稍后再说"}), None)
+            if dismiss_ref:
+                await self._run_json("click", dismiss_ref, "--session", session_id, timeout=30)
+                return True
         expression = (
             "(() => { const markers = " + json.dumps(markers, ensure_ascii=False) + "; "
             "const candidates = [...document.querySelectorAll('[role=dialog],body > div')]; "
@@ -1327,6 +1586,8 @@ class BskCliClient:
         timeout: float = 30.0,
     ) -> None:
         if platform == "doubao":
+            if not await self._doubao_dialogue_ready(session_id):
+                raise RuntimeError("Doubao conversation mode changed before submission; no prompt sent")
             await self._dismiss_blocking_overlays(session_id, platform)
             observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
             send_ref = self._find_button_ref(str(observation.get("text", "")), ("Chat input send", "发送"))
@@ -1350,7 +1611,7 @@ class BskCliClient:
                 "const userQuery = document.querySelector('user-query, .query-text, .user-query'); "
                 "const platformError = (document.body?.innerText || '').match("
                 "/Something went wrong(?:\\s*\\(\\d+\\))?|出了点问题|出错了/i); "
-                "return {submitted: stop || conversation || Boolean(answer) || Boolean(userQuery) || Boolean(composer && !text.trim()), "
+                "return {submitted: stop || conversation || Boolean(answer) || Boolean(userQuery), "
                 "platform_error:platformError?.[0] || null, "
                 "composerEmpty: !text.trim(), conversation, answer: Boolean(answer), "
                 "userQuery: Boolean(userQuery)}; })()"
@@ -1448,25 +1709,47 @@ class BskCliClient:
                     if attempt == 2:
                         raise
                 for _ in range(3):
-                    result = await self._run_json(
-                        "evaluate", state_expression, "--session", session_id,
-                        timeout=timeout,
-                    )
+                    try:
+                        result = await self._run_json(
+                            "evaluate", state_expression, "--session", session_id,
+                            timeout=timeout,
+                        )
+                    except RuntimeError as error:
+                        if "strict observation changed" not in str(error).casefold():
+                            raise
+                        # The send may already have succeeded while the page streamed.
+                        # Read the exact latest user turn; never replay input to reconcile.
+                        visible = await self._run_json(
+                            "read", "--selector", '[data-message-author-role="user"]',
+                            "--fields-json", json.dumps([{"key": "text", "read": "text"}]),
+                            "--session", session_id, timeout=timeout,
+                        )
+                        turns = visible.get("items", [])
+                        if (not visible.get("truncated") and turns
+                                and "text" not in turns[-1].get("redacted", [])
+                                and str(turns[-1].get("values", {}).get("text") or "").strip() == before.strip()):
+                            return
+                        raise
                     state = self._result_value(result)
                     if isinstance(state, dict) and state.get("submitted"):
                         return
                     await asyncio.sleep(self.poll_interval)
             raise RuntimeError("ChatGPT submission state did not change after 3 attempts")
         if platform == "perplexity":
-            try:
+            observation = await self._run_json("observe", "--session", session_id, timeout=timeout)
+            page_text = str(observation.get("text", ""))
+            send_ref = self._find_button_ref(page_text, ("Submit", "Send", "提交", "发送"))
+            if send_ref:
                 await self._run_json(
-                    "click", 'button[aria-label="提交"], button[aria-label="Submit"]',
-                    "--session", session_id, timeout=timeout
+                    "click", send_ref, "--session", session_id, timeout=timeout
                 )
                 return
-            except RuntimeError:
-                pass
-        if platform in {"chatgpt", "perplexity"}:
+            editor = self._find_textbox_ref(page_text, PLATFORMS[platform]["textbox"])
+            if not editor:
+                raise SamplingModeError("Sampling mode blocked: Perplexity search send target not confirmed")
+            await self._run_json("press", "Enter", "--ref", editor, "--session", session_id, timeout=timeout)
+            return
+        if platform == "chatgpt":
             await self._run_json(
                 "press",
                 "Enter",
@@ -1640,25 +1923,110 @@ class BskCliClient:
         return str(value or "")
 
     async def _ensure_perplexity_standard_search(self, session_id: str) -> bool:
-        expression = (
-            "(() => { const buttons = [...document.querySelectorAll('button')]; "
-            "const standard = buttons.find(button => "
-            "/^(搜索|Search)$/i.test((button.innerText || '').trim())); "
-            "if (!standard) return {found:false, active:false}; "
-            "if (standard.getAttribute('aria-pressed') !== 'true') standard.click(); "
-            "return {found:true, active:standard.getAttribute('aria-pressed') === 'true'}; })()"
-        )
         for _ in range(3):
             result = await self._run_json(
-                "evaluate", expression, "--session", session_id, timeout=30
+                "read", "--selector", 'button,[role="tab"]', "--fields-json", json.dumps([
+                    {"key": "text", "read": "text"},
+                    {"key": "label", "read": "attribute", "attribute": "aria-label"},
+                    {"key": "pressed", "read": "attribute", "attribute": "aria-pressed"},
+                    {"key": "selected", "read": "attribute", "attribute": "aria-selected"},
+                ]), "--session", session_id, timeout=30,
             )
-            state = self._result_value(result)
-            if isinstance(state, dict) and state.get("found") and state.get("active"):
+            if result.get("truncated") or "items" not in result:
+                return False
+            standard = None
+            work_active = False
+            for item in result["items"]:
+                values = item.get("values", {})
+                label = str(values.get("label") or values.get("text") or "").strip()
+                active = values.get("pressed") == "true" or values.get("selected") == "true"
+                if is_forbidden_mode_label(label) and active:
+                    work_active = True
+                if label.casefold() in {"search", "搜索"}:
+                    standard = (item, active)
+            if not standard:
+                return False
+            if standard[1] and not work_active:
                 return True
+            await self._run_json("click", standard[0]["ref"], "--session", session_id, timeout=30)
             await asyncio.sleep(self.poll_interval)
         return False
 
+    async def _assert_non_work_mode(self, session_id: str, platform: str, *, stage: str) -> None:
+        result = await self._run_json(
+            "read", "--selector", ACTIVE_MODE_SELECTOR, "--fields-json", json.dumps([
+                {"key": "text", "read": "text"},
+                {"key": "label", "read": "attribute", "attribute": "aria-label"},
+            ]), "--session", session_id, timeout=30,
+        )
+        if result.get("truncated") or "items" not in result:
+            raise SamplingModeError("Sampling mode blocked: active UI mode could not be inspected")
+        labels = []
+        for item in result["items"]:
+            if item.get("redacted"):
+                raise SamplingModeError("Sampling mode blocked: active mode control is redacted")
+            values = item.get("values", {})
+            labels.append(str(values.get("label") or values.get("text") or "").strip())
+        blocked = [label for label in labels if is_forbidden_mode_label(label)]
+        check = {"stage": stage, "policy": "ordinary_chat_or_search_only", "active_mode_labels": labels, "blocked_modes": blocked}
+        self._sampling_mode_checks.setdefault(session_id, []).append(check)
+        if blocked:
+            raise SamplingModeError("Sampling mode blocked: work/Computer active; no prompt may be sent")
+        if platform == "perplexity" and not any(label.casefold() in {"search", "搜索"} for label in labels):
+            raise SamplingModeError("Sampling mode blocked: Perplexity ordinary Search mode is not active")
+
+    async def _read_stream_page(self, session_id: str, selector: str) -> dict:
+        async def read(target, fields):
+            result = await self._run_json(
+                "read", "--selector", target, "--fields-json", json.dumps(fields),
+                "--session", session_id, timeout=30,
+            )
+            if result.get("truncated"):
+                raise RuntimeError("Streaming answer DOM read was truncated")
+            return result.get("items", [])
+
+        nodes = await read(selector, [{"key": "text", "read": "text"}])
+        entries = []
+        source_errors = []
+        for node in nodes:
+            text = str(node.get("values", {}).get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                links_result = await self._run_json(
+                    "extract", "list", "--ref", node["ref"], "--item-selector", "a[href]",
+                    "--fields-json", json.dumps({"fields": [
+                        {"key": "url", "selector": ":scope", "read": "href"},
+                        {"key": "title", "selector": ":scope", "read": "text"},
+                    ]}), "--session", session_id, timeout=30,
+                )
+                if links_result.get("truncated") or links_result.get("coverage") == "incomplete":
+                    raise RuntimeError("Streaming answer link extraction was incomplete")
+            except RuntimeError as error:
+                source_errors.append(str(error))
+                links_result = {"rows": []}
+            entries.append({"text": text, "links": links_result.get("rows", [])})
+        buttons = await read("button", [
+            {"key": "text", "read": "text"},
+            {"key": "label", "read": "attribute", "attribute": "aria-label"},
+        ])
+        body = await read("main", [{"key": "text", "read": "text"}])
+        return {
+            "answers": [entry["text"] for entry in entries],
+            "answer_entries": entries,
+            "source_read_diagnostic": "; ".join(source_errors) or None,
+            "links": [],
+            "generating": any(re.search(
+                r"停止生成|停止响应|Stop generating|Stop responding|Stop response",
+                str(button.get("values", {}).get("label") or "") + " "
+                + str(button.get("values", {}).get("text") or ""), re.I
+            ) for button in buttons),
+            "page_text": "\n".join(str(item.get("values", {}).get("text") or "") for item in body),
+        }
+
     async def _answer_page(self, session_id: str, selector: str) -> dict:
+        if session_id in self._stream_read_sessions:
+            return await self._read_stream_page(session_id, selector)
         expression = (
             "(() => { const nodes = [...document.querySelectorAll("
             + json.dumps(selector)
@@ -1697,6 +2065,12 @@ class BskCliClient:
             "const yuanbaoStillGenerating = location.hostname === 'yuanbao.tencent.com' && "
             "Boolean(latestYuanbaoAnswer) && "
             "!latestYuanbaoAnswer.querySelector('[aria-label=重新生成]'); "
+            "const doubaoStillStreaming = location.hostname === 'www.doubao.com' && "
+            "nodes.some(n => n.getAttribute('data-streaming') === 'true'); "
+            "const latestDoubaoTurn = [...document.querySelectorAll('[data-testid=receive_message]')].at(-1); "
+            "const doubaoStillResearching = location.hostname === 'www.doubao.com' && "
+            "nodes.length > 0 && (!latestDoubaoTurn || "
+            "!latestDoubaoTurn.querySelector('[data-testid=message_action_regenerate]')); "
             "const accountChanged = location.hostname === 'chatgpt.com' && "
             "[...document.querySelectorAll('[role=alert]')].some(n => "
             "/^Your account changed[.!]?\\s+Send your message again\\b/i.test((n.innerText || '').trim())); "
@@ -1708,13 +2082,19 @@ class BskCliClient:
             "answer_links:nodes.flatMap(n => answerLinks(n).map(a => "
             "({url:a.href,title:(a.innerText || a.textContent || '').trim() || null}))),"
             "links:[...new Set(nodes.flatMap(n => answerLinks(n).map(a => a.href)))],"
-            "generating:yuanbaoStillGenerating || buttons.some(b => "
+            "generating:yuanbaoStillGenerating || doubaoStillStreaming || doubaoStillResearching || buttons.some(b => "
             "/停止生成|停止响应|Stop generating|Stop responding|Stop response/i.test("
             "(b.getAttribute('aria-label') || '') + ' ' + (b.innerText || ''))),"
             "rate_limited:/429|rate limit|请求过于频繁|已达到免费搜索次数上限|使用权限将在几小时后重置|free searches limit|距离限制重置还剩|upgrade to supergrok/i.test(bodyText),"
             "page_text:bodyText}; })()"
         )
-        result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+        try:
+            result = await self._run_json("evaluate", expression, "--session", session_id, timeout=30)
+        except RuntimeError as error:
+            if selector not in {PLATFORMS[name]["answer_selector"] for name in ("perplexity", "gemini")} or "strict observation changed" not in str(error).casefold():
+                raise
+            self._stream_read_sessions.add(session_id)
+            return await self._read_stream_page(session_id, selector)
         value = self._result_value(result)
         return value if isinstance(value, dict) else {"answers": [], "links": []}
 
@@ -2085,7 +2465,10 @@ class BskCliClient:
                 else:
                     complete = False
                 if not cleaned:
-                    return cards, False, True
+                    # Stop operating on the browser after cleanup is blocked.
+                    # All visible URLs may already be verified when this was
+                    # the final card; popup cleanup is not source extraction.
+                    return cards, complete and card_index == len(panel["buttons"]) - 1, True
             await self._run_json(
                 "evaluate", prefix + "if(t?.getAttribute('aria-expanded')==='true')t.click(); return true; })()",
                 "--session", session_id,
@@ -2609,6 +2992,8 @@ class BskCliClient:
             await self._run_json("session", "stop", session_id)
         finally:
             self._session_tabs.pop(session_id, None)
+            self._stream_read_sessions.discard(session_id)
+            self._sampling_mode_checks.pop(session_id, None)
 
     @staticmethod
     def _find_textbox_ref(
@@ -2715,6 +3100,7 @@ class BrowserSkillAdapter(ProbeAdapter):
             } else 1
             retryable = {FailureKind.EXTRACTION_FAILED, FailureKind.TIMEOUT}
             deadline = asyncio.get_running_loop().time() + total_timeout
+            attempt_evidence = []
             for attempt_index in range(max_attempts):
                 attempt_timeout = (
                     deadline - asyncio.get_running_loop().time()
@@ -2722,6 +3108,9 @@ class BrowserSkillAdapter(ProbeAdapter):
                     else total_timeout
                 )
                 if attempt_timeout <= 0:
+                    if attempt_index:
+                        # Keep the last failure body and evidence when the shared budget expires.
+                        break
                     output = BrowserProbeOutput(
                         failure=FailureKind.TIMEOUT,
                         diagnostic=f"timeout after {total_timeout:g}s total budget",
@@ -2742,6 +3131,15 @@ class BrowserSkillAdapter(ProbeAdapter):
                     output = BrowserProbeOutput(
                         failure=FailureKind.TIMEOUT,
                         diagnostic="timeout",
+                    )
+                except SamplingModeError as error:
+                    output = BrowserProbeOutput(
+                        failure=FailureKind.SEND_FAILED,
+                        diagnostic=str(error),
+                        retryable=False,
+                        source_evidence={"sampling_mode_checks": list(
+                            self.client._sampling_mode_checks.get(session_id, [])
+                        )} if isinstance(self.client, BskCliClient) else {},
                     )
                 except RuntimeError as error:
                     diagnostic = str(error)
@@ -2771,12 +3169,21 @@ class BrowserSkillAdapter(ProbeAdapter):
                     except Exception:
                         pass
                     session_id = None
+                if output.failure is not None and output.source_evidence:
+                    attempt_evidence.append({
+                        "attempt": attempt_index + 1, "answer": output.answer,
+                        "conversation_url": output.conversation_url,
+                        "failure": output.failure.value, "diagnostic": output.diagnostic,
+                        **output.source_evidence,
+                    })
                 if (
                     not output.retryable
                     or output.failure not in retryable
                     or attempt_index == max_attempts - 1
                 ):
                     break
+            if attempt_evidence:
+                output.source_evidence["attempt_diagnostics"] = attempt_evidence
             if output.login_required:
                 return PlatformAttempt(
                     platform=platform,
@@ -2784,23 +3191,6 @@ class BrowserSkillAdapter(ProbeAdapter):
                     status=JobStatus.WAITING_FOR_LOGIN,
                     diagnostic=output.diagnostic or "login required",
                     failure=FailureKind.LOGIN_REQUIRED,
-                    query_original=normalized.original,
-                    query_sent=normalized.sent,
-                    query_normalized=normalized.changed,
-                )
-            if output.failure is not None:
-                return PlatformAttempt(
-                    raw_answer=output.answer,
-                    normalized_answer=output.answer.strip(),
-                    conversation_url=output.conversation_url,
-                    source_capture_status=output.source_capture_status,
-                    source_capture_diagnostic=output.source_capture_diagnostic,
-                    locale_verified=locale_verified,
-                    platform=platform,
-                    adapter=self.name,
-                    status=JobStatus.FAILED,
-                    diagnostic=output.diagnostic or output.failure.value,
-                    failure=output.failure,
                     query_original=normalized.original,
                     query_sent=normalized.sent,
                     query_normalized=normalized.changed,
@@ -2829,6 +3219,24 @@ class BrowserSkillAdapter(ProbeAdapter):
                         note for note in (output.source_capture_diagnostic, detail) if note
                     )
                     output.source_capture_status = SourceCaptureStatus.FAILED
+            if output.failure is not None:
+                return PlatformAttempt(
+                    artifact_paths=artifact_paths,
+                    raw_answer=output.answer,
+                    normalized_answer=output.answer.strip(),
+                    conversation_url=output.conversation_url,
+                    source_capture_status=output.source_capture_status,
+                    source_capture_diagnostic=output.source_capture_diagnostic,
+                    locale_verified=locale_verified,
+                    platform=platform,
+                    adapter=self.name,
+                    status=JobStatus.FAILED,
+                    diagnostic=output.diagnostic or output.failure.value,
+                    failure=output.failure,
+                    query_original=normalized.original,
+                    query_sent=normalized.sent,
+                    query_normalized=normalized.changed,
+                )
             return PlatformAttempt(
                 conversation_url=output.conversation_url,
                 artifact_paths=artifact_paths,

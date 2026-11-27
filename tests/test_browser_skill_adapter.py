@@ -6,6 +6,318 @@ from pathlib import Path
 import pytest
 import look4geo_probe.adapters.browser_skill as browser_skill
 
+
+@pytest.mark.parametrize('label', ['Ask anything…', 'Ask anything...'])
+def test_perplexity_current_ellipsis_editor_label(label):
+    assert browser_skill.BskCliClient._find_textbox_ref(
+        f'@e7 textbox "{label}" [empty]', browser_skill.PLATFORMS['perplexity']['textbox']) == '@e7'
+
+
+@pytest.mark.asyncio
+async def test_perplexity_entry_uses_fresh_observed_ref_and_verifies_exact_text():
+    class Client(browser_skill.BskCliClient):
+        value = ''
+        calls = []
+        async def _run_json(self, *args, **kwargs):
+            self.calls.append(args)
+            if args[0] == 'observe':
+                return {'text': '@e7 textbox "Ask anything…" [empty]'}
+            if args[0] == 'fill':
+                assert args[1] == '@e7'
+                self.value = args[args.index('--value') + 1]
+                return {}
+            if args[0] == 'read':
+                assert '--ref' in args and args[args.index('--ref') + 1] == '@e7'
+                return {'items': [{'values': {'text': self.value}, 'redacted': []}], 'truncated': False}
+            pytest.fail('Must not use generic selectors, script input or click through an overlay')
+    client = Client('browser')
+    await client._enter_prompt('s', 'perplexity', '@stale', 'exact original question')
+    assert client.value == 'exact original question'
+
+
+@pytest.mark.asyncio
+async def test_perplexity_search_switch_is_native_and_verifies_computer_off():
+    class Client(browser_skill.BskCliClient):
+        search = False
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == 'read':
+                return {'items': [
+                    {'ref': '@search', 'values': {'text': 'Search', 'label': 'Search', 'pressed': str(self.search).lower()}},
+                    {'ref': '@work', 'values': {'text': 'Computer', 'label': 'Computer', 'pressed': str(not self.search).lower()}},
+                ], 'truncated': False}
+            if args[0] == 'click':
+                assert args[1] == '@search'
+                self.search = True
+                return {}
+            pytest.fail('Search switching must not use a JavaScript click or select Computer')
+    client = Client('browser', poll_interval=0)
+    assert await client._ensure_perplexity_standard_search('s')
+    assert client.search
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('platform', list(browser_skill.PLATFORMS))
+@pytest.mark.parametrize('label', ['Work', 'Computer', '工作模式'])
+async def test_every_browser_platform_blocks_active_work_mode(platform, label):
+    class Client(browser_skill.BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            assert args[0] == 'read'
+            return {'items': [{'values': {'text': label, 'label': label}}], 'truncated': False}
+    with pytest.raises(RuntimeError, match='work/Computer'):
+        await Client('browser')._assert_non_work_mode('s', platform, stage='before_prompt')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['before_prompt', 'before_submit'])
+async def test_mode_guard_runs_before_typing_and_again_before_send(stage):
+    class Client(DelayedAnswerClient):
+        entered = False
+        async def _assert_non_work_mode(self, session, platform, *, stage: str):
+            if stage == blocked_stage:
+                raise browser_skill.SamplingModeError('Sampling mode blocked: work/Computer active')
+        async def _enter_prompt(self, *args, **kwargs):
+            self.entered = True
+        async def _submit_prompt(self, *args, **kwargs):
+            pytest.fail('Must never send in work mode')
+    blocked_stage = stage
+    client = Client([{'answers': [], 'links': []}])
+    with pytest.raises(RuntimeError, match='work/Computer'):
+        await client.probe('s', 'chatgpt', 'question', .1)
+    assert client.entered == (stage == 'before_submit')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text,redacted,confirmed', [
+    ('original question', [], True), ('another question', [], False),
+    ('original question', ['text'], False),
+])
+async def test_chatgpt_strict_submit_check_uses_exact_visible_user_turn(text, redacted, confirmed):
+    class Client(browser_skill.BskCliClient):
+        def __init__(self):
+            super().__init__('browser', poll_interval=0)
+            self.actions = []
+
+        async def _composer_text(self, *args):
+            return 'original question'
+
+        async def _run_json(self, *args, **kwargs):
+            self.actions.append(args[0])
+            if args[0] == 'evaluate':
+                raise RuntimeError('permission_denied: The strict observation changed before this action')
+            if args[0] == 'read':
+                return {'items': [{'values': {'text': text}, 'redacted': redacted}], 'truncated': False}
+            return {'value': True}
+
+    client = Client()
+    if confirmed:
+        await client._submit_prompt('session', 'chatgpt', None)
+    else:
+        with pytest.raises(RuntimeError, match='strict observation changed'):
+            await client._submit_prompt('session', 'chatgpt', None)
+    assert client.actions == ['click', 'evaluate', 'read']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,ready,reason,accepted", [
+    ("question", True, "User activity revoked this action", True),
+    ("partial", True, "User activity revoked this action", False),
+    ("question", False, "User activity revoked this action", False),
+    ("question", True, "user_aborted", False),
+])
+async def test_prompt_interruption_reconciles_without_replaying(text, ready, reason, accepted):
+    class ReconcileClient(browser_skill.BskCliClient):
+        entries = 0
+
+        async def _enter_prompt(self, *args, **kwargs):
+            self.entries += 1
+            raise browser_skill.BrowserControlInterrupted(reason)
+
+        async def _cooperate_context(self, *args, **kwargs):
+            if not ready:
+                raise browser_skill.BrowserControlInterrupted("human is in control")
+            return "ready-context", "observation"
+
+        async def _run_json(self, *args, **kwargs):
+            assert args[0] == "read", "reconciliation must never replay input"
+            return {"items": [{"values": {"text": text, "value": None}}], "truncated": False}
+
+    client = ReconcileClient("browser")
+    if accepted:
+        await client._enter_prompt_checked("session", "doubao", None, "question")
+    else:
+        with pytest.raises(browser_skill.BrowserControlInterrupted):
+            await client._enter_prompt_checked("session", "doubao", None, "question")
+    assert client.entries == 1
+
+
+@pytest.mark.asyncio
+async def test_doubao_download_promo_uses_observed_dismiss_button():
+    class PromoClient(browser_skill.BskCliClient):
+        clicked = []
+
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "observe":
+                return {"text": 'dialog "下载电脑版 使用完整功能"\n @e6 button "下次提醒我"'}
+            if args[0] == "click":
+                self.clicked.append(args[1])
+                return {}
+            return {"value": False}
+
+    client = PromoClient("browser")
+    assert await client._dismiss_blocking_overlays("session", "doubao")
+    assert client.clicked == ["@e6"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_service_restriction_is_actionable_not_missing_textbox():
+    class RestrictedClient(browser_skill.BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "navigate":
+                return {"final_url": "https://myaccount.google.com/restrictions/280?continue=https://gemini.google.com/app"}
+            return {"text": "Review service restriction"}
+
+        async def _wait_composer_available(self, *args, **kwargs):
+            pytest.fail("a confirmed Google restriction is not an editor readiness failure")
+
+    result = await RestrictedClient("browser").probe("session", "gemini", "test", 30)
+    assert result.login_required
+    assert not result.retryable
+    assert "Google service restriction" in result.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_gemini_submission_state_javascript_is_syntactically_valid():
+    if not shutil.which("node"):
+        pytest.skip("Node.js required")
+
+    class SyntaxClient(browser_skill.BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "evaluate":
+                result = subprocess.run(
+                    ["node", "-e", "new Function(process.argv[1]);", args[1]],
+                    capture_output=True, text=True,
+                )
+                assert result.returncode == 0, result.stderr
+                return {"value": {"submitted": True}}
+            return {"text": '@e1 button "Send message"'}
+
+    await SyntaxClient("browser", poll_interval=0)._submit_prompt("session", "gemini", None)
+
+
+@pytest.mark.asyncio
+async def test_gemini_native_fill_recovers_from_editor_remount():
+    class RemountClient(browser_skill.BskCliClient):
+        fills = 0
+
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "fill":
+                self.fills += 1
+                if self.fills == 1:
+                    raise RuntimeError("cdp_failed: fill target changed or lost focus before typing")
+            return {}
+
+        async def _composer_text(self, *args, **kwargs):
+            return "test question" if self.fills == 2 else ""
+
+    client = RemountClient("browser", poll_interval=0)
+    await client._enter_prompt("session", "gemini", None, "test question")
+    assert client.fills == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_focus_failure_fallback_requires_exact_editor_text():
+    class FocusClient(browser_skill.BskCliClient):
+        text = ""
+
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == "fill":
+                raise RuntimeError("fill target changed or lost focus before typing")
+            if args[0] == "evaluate":
+                assert "execCommand" in args[1]
+                self.text = "verified question"
+            return {}
+
+        async def _composer_text(self, *args, **kwargs):
+            return self.text
+
+    await FocusClient("browser", poll_interval=0)._enter_prompt("session", "gemini", None, "verified question")
+
+
+@pytest.mark.asyncio
+async def test_perplexity_security_verification_is_not_missing_textbox():
+    class ChallengeClient(browser_skill.BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            return {"text": "Just a moment... Performing security verification This website uses a security service to protect against malicious bots."}
+
+        async def _wait_composer_available(self, *args, **kwargs):
+            pytest.fail("must identify verification before looking for composer")
+
+    result = await ChallengeClient("browser").probe("session", "perplexity", "test", 1)
+    assert result.login_required
+    assert "verification" in result.diagnostic
+
+
+def test_command_error_preserves_browser_error_field():
+    assert "Unexpected token" in browser_skill.command_error_detail(
+        b'{"ok": false, "error": "SyntaxError: Unexpected token"}', b""
+    )
+
+
+@pytest.mark.asyncio
+async def test_navigation_retries_connection_closed_before_prompt_only():
+    class NavigationClient(browser_skill.BskCliClient):
+        calls = 0
+
+        async def _run_json(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("cdp_failed: net::ERR_CONNECTION_CLOSED")
+            return {"final_url": "https://gemini.google.com/app"}
+
+    client = NavigationClient("browser", poll_interval=0)
+    result = await client._navigate("session", "https://gemini.google.com/app", timeout=30)
+    assert result["final_url"] == "https://gemini.google.com/app"
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_navigation_does_not_retry_permission_errors():
+    class DeniedClient(browser_skill.BskCliClient):
+        calls = 0
+
+        async def _run_json(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("permission_denied")
+
+    client = DeniedClient("browser", poll_interval=0)
+    with pytest.raises(RuntimeError, match="permission_denied"):
+        await client._navigate("session", "https://gemini.google.com/app", timeout=30)
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loaded_url", ["https://gemini.google.com/app", "chrome-error://chromewebdata/"])
+async def test_gemini_load_timeout_requires_real_target_and_ready_composer(loaded_url):
+    class LoadedClient(browser_skill.BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            raise RuntimeError('timed out waiting for lifecycle "load" after 30000ms')
+
+        async def _current_url(self, session_id):
+            return loaded_url
+
+        async def _wait_composer_available(self, session_id, selector, *, rounds=10):
+            assert loaded_url == "https://gemini.google.com/app"
+            return True
+
+    client = LoadedClient("browser", poll_interval=0)
+    if loaded_url.startswith("chrome-error:"):
+        with pytest.raises(RuntimeError, match="lifecycle"):
+            await client._navigate("session", "https://gemini.google.com/app", timeout=30)
+    else:
+        result = await client._navigate("session", loaded_url, timeout=30)
+        assert result["final_url"] == loaded_url
+        assert "lifecycle" in result["navigation_warning"]
+
 from look4geo_probe.adapters.browser_skill import (
     BskCliClient,
     BrowserProbeOutput,
@@ -490,15 +802,10 @@ class ComposerStateClient(BskCliClient):
 
 @pytest.mark.asyncio
 async def test_perplexity_standard_search_mode_must_be_confirmed():
-    client = ComposerStateClient(
-        [
-            {"found": True, "active": False},
-            {"found": True, "active": True},
-        ]
-    )
-
-    assert await client._ensure_perplexity_standard_search("session") is True
-    assert len(client.calls) == 2
+    class Client(BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            return {"items": [], "truncated": False}
+    assert await Client("browser")._ensure_perplexity_standard_search("session") is False
 
 
 class GeminiSubmitClient(BskCliClient):
@@ -622,8 +929,11 @@ class GeminiEnterSubmitClient(BskCliClient):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("user_query,has_composer", [(False, True), (True, True), (False, False)])
-async def test_gemini_submission_check_executes_real_browser_script(user_query, has_composer):
+@pytest.mark.parametrize("user_query,has_composer,empty_composer", [
+    (False, True, False), (True, True, False), (False, False, False),
+    (False, True, True), (True, True, True),
+])
+async def test_gemini_submission_check_executes_real_browser_script(user_query, has_composer, empty_composer):
     if not shutil.which("node"):
         pytest.skip("Node.js is required to exercise browser JavaScript")
 
@@ -640,13 +950,13 @@ async def test_gemini_submission_check_executes_real_browser_script(user_query, 
                 return {"ok": True}
             harness = (
                 "global.location={pathname:'/app'};"
-                "const composer={innerText:'Test question',getClientRects:()=>[{}]};"
+                "const composer={innerText:process.argv[4]==='true'?'':'Test question',getClientRects:()=>[{}]};"
                 "global.document={querySelectorAll:s=>s==='button'||process.argv[3]!=='true'?[]:[composer],"
                 "querySelector:s=>s.includes('user-query')&&process.argv[2]==='true'?{}:null};"
                 "process.stdout.write(JSON.stringify(eval(process.argv[1])));"
             )
             result = subprocess.run(
-                ["node", "-e", harness, args[1], str(user_query).lower(), str(has_composer).lower()],
+                ["node", "-e", harness, args[1], str(user_query).lower(), str(has_composer).lower(), str(empty_composer).lower()],
                 capture_output=True, text=True, check=True,
             )
             return {"value": json.loads(result.stdout)}
@@ -703,6 +1013,9 @@ class DelayedAnswerClient(BskCliClient):
             return {"text": '@e18 textbox "问任何事情..." [empty]'}
         return {"value": True}
 
+    async def _assert_non_work_mode(self, *args, **kwargs):
+        return None
+
     async def _enter_prompt(self, *args, **kwargs):
         return None
 
@@ -716,6 +1029,9 @@ class DelayedAnswerClient(BskCliClient):
         return True
 
     async def _ensure_gemini_mode(self, session_id):
+        return True
+
+    async def _ensure_doubao_conversation(self, session_id):
         return True
 
     async def _wait_submission_ready(self, *args, **kwargs):
@@ -856,6 +1172,62 @@ async def test_chatgpt_dom_reads_latest_turn_state_not_old_completed_turn(state,
             return {"value": json.loads(result.stdout)}
     page = await DomClient("81483588")._answer_page("session", PLATFORMS["chatgpt"]["answer_selector"])
     assert page.get("completion_confirmed") is expected
+
+
+@pytest.mark.asyncio
+async def test_doubao_new_conversation_never_selects_first_work_button():
+    class ModeClient(BskCliClient):
+        def __init__(self):
+            super().__init__("browser", poll_interval=0)
+            self.calls = []
+
+        async def _run_json(self, *args, timeout=30):
+            self.calls.append(args)
+            if args[0] == "observe":
+                return {"text": '@e5 button "新工作任务 ⌘ J"\n@e6 button "新对话 ⇧ ⌘ K"'}
+            return {"value": True}
+
+    client = ModeClient()
+    assert await client._ensure_doubao_conversation("session")
+    assert [call[:2] for call in client.calls if call[0] == "click"] == [("click", "@e6")]
+
+
+@pytest.mark.asyncio
+async def test_doubao_work_mode_after_new_conversation_is_rejected():
+    class WorkClient(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            if args[0] == "observe":
+                return {"text": '@e6 button "新对话 ⇧ ⌘ K"'}
+            return {"value": False}
+
+    assert not await WorkClient("browser", poll_interval=0)._ensure_doubao_conversation("session")
+
+
+@pytest.mark.asyncio
+async def test_doubao_unconfirmed_mode_stops_before_prompt_entry():
+    class UnsafeClient(DelayedAnswerClient):
+        async def _ensure_doubao_conversation(self, session_id):
+            return False
+
+        async def _enter_prompt(self, *args, **kwargs):
+            pytest.fail("must not type in an unconfirmed mode")
+
+    output = await UnsafeClient([]).probe("session", "doubao", "question", timeout=1)
+    assert output.failure == FailureKind.SEND_FAILED
+    assert "conversation mode" in output.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_doubao_mode_switch_before_send_blocks_click():
+    class SwitchedClient(BskCliClient):
+        async def _doubao_dialogue_ready(self, session_id, *, require_empty=False):
+            return False
+
+        async def _run_json(self, *args, **kwargs):
+            pytest.fail("must not send after switching to work mode")
+
+    with pytest.raises(RuntimeError, match="conversation mode"):
+        await SwitchedClient("browser")._submit_prompt("session", "doubao", None)
 
 
 class SourceCollectorClient(BskCliClient):
@@ -1077,6 +1449,8 @@ async def test_yuanbao_english_login_overlay_after_submission_stops_polling():
                 return {"final_url": "https://yuanbao.tencent.com/chat/naQivTmsDa"}
             if args[0] == "observe":
                 return {"text": '@e13 textbox "Ask me anything. Use Shift+Enter for a new line." [empty]'}
+            if args[0] == "read":
+                return {"items": [], "truncated": False}
             return {"value": True}
 
         async def _answer_page(self, session_id, selector):
@@ -1201,6 +1575,8 @@ async def test_doubao_current_download_promo_closes_without_clicking_download():
 
     class PromoClient(BskCliClient):
         async def _run_json(self, *args, timeout=30):
+            if args[0] == "observe":
+                return {"text": ""}  # Exercise the legacy DOM fallback too.
             script = r'''
 let clicked = '';
 const buttons = ['下载豆包工作','下次提醒我','关闭'].map(text=>({
@@ -1224,6 +1600,9 @@ async def test_doubao_submission_uses_fresh_send_reference():
             super().__init__("browser")
             self.calls = []
 
+        async def _doubao_dialogue_ready(self, session_id, *, require_empty=False):
+            return True
+
         async def _run_json(self, *args, timeout=30):
             self.calls.append(args)
             return {"text": '@e55 button "Chat input send"'}
@@ -1243,7 +1622,7 @@ async def test_doubao_picture_challenge_stops_without_retry_or_timeout():
         async def _run_json(self, *args, timeout=30):
             if args[0] == "observe":
                 self.observations += 1
-                if self.observations > 1:
+                if self.submit_count:
                     return {"text": "请选择所有符合上文描述的图片，并拖拽到下方"}
             return await super()._run_json(*args, timeout=timeout)
 
@@ -1679,7 +2058,7 @@ async def test_gemini_submission_check_uses_visible_composer():
     expression = next(call[1] for call in client.calls if call[0] == "evaluate")
     assert "find(node => node.getClientRects().length)" in expression
     assert "user-query" in expression
-    assert "Boolean(composer && !text.trim())" in expression
+    assert "|| Boolean(composer && !text.trim())" not in expression
 
 
 @pytest.mark.asyncio
@@ -1723,12 +2102,23 @@ async def test_gemini_falls_back_to_enter_when_send_button_is_missing():
 
 @pytest.mark.asyncio
 async def test_perplexity_uses_native_input_and_submit_button_on_fill_change():
-    client = FillFallbackClient()
-    await client._enter_prompt("session", "perplexity", "@e18", "hello")
-    assert client.calls[-1][:2] == ("fill", "--selector")
-    assert "--no-clear" in client.calls[-1]
-    await client._submit_prompt("session", "perplexity", "@e18")
-    assert client.calls[-1][:2] == ("click", 'button[aria-label="提交"], button[aria-label="Submit"]')
+    class Client(BskCliClient):
+        calls = []
+        async def _run_json(self, *args, **kwargs):
+            self.calls.append(args)
+            if args[0] == "observe":
+                return {"text": '@e7 textbox "Ask anything…"\n@e9 button "Submit"'}
+            if args[0] == "fill":
+                raise RuntimeError("fill changed state before reporting error")
+            if args[0] == "read":
+                return {"items": [{"values": {"text": "hello"}}], "truncated": False}
+            assert args[:2] == ("click", "@e9")
+            return {}
+    client = Client("browser")
+    await client._enter_prompt("session", "perplexity", "@stale", "hello")
+    await client._submit_prompt("session", "perplexity", "@stale")
+    assert len([call for call in client.calls if call[0] == "fill"]) == 1
+    assert client.calls[-1][:2] == ("click", "@e9")
 
 
 @pytest.mark.asyncio
@@ -2220,6 +2610,7 @@ async def test_gemini_transient_error_is_not_returned_as_success(transient_error
 
     assert output.failure == FailureKind.EXTRACTION_FAILED
     assert output.diagnostic == "Gemini returned a transient platform error"
+    assert output.answer == transient_error
 
 
 @pytest.mark.asyncio
@@ -2321,6 +2712,77 @@ async def test_chatgpt_short_preamble_is_not_success_without_generation_signal()
 
     assert output.failure == FailureKind.EXTRACTION_FAILED
     assert output.answer == ""
+
+
+@pytest.mark.parametrize("preamble", [
+    "我再深入读几篇关键盘点，把具体机构名单和可核验依据抠出来。",
+    "初步找到了一批服务商，让我进一步深挖几家重点团队的海外 GEO 能力和 B2B 化工行业适配度。",
+    "搜到不少名单，但很多是软文口径。我再精读几篇对外贸 / B2B 场景针对性强的文章，把服务范围和交付方式核实清楚。",
+    "我补充检索这些服务商针对海外生成式引擎的外贸制造落地能力。",
+    "初步信息已拿到。我再深读两篇与外贸 B2B 最相关的拆解文章。",
+    "再补一轮，确认几家监测诊断型工具的具体能力。",
+])
+@pytest.mark.asyncio
+async def test_doubao_research_progress_is_not_a_finished_answer(preamble):
+    complete = "完整结论：" + "比较机构资质、实际交付和可复核证据，不采信包排名承诺。" * 15
+    client = DelayedAnswerClient([
+        {"answers": [], "links": []},
+        *[{"answers": [preamble], "links": []}] * 5,
+        *[{"answers": [complete], "links": []}] * 3,
+    ])
+    output = await client.probe("session", "doubao", "请比较服务商", timeout=1)
+    assert output.answer == complete
+
+
+@pytest.mark.asyncio
+async def test_doubao_progress_only_times_out_as_incomplete_not_success():
+    preamble = "初步找到了一批服务商，让我进一步深挖几家重点团队。"
+    client = DelayedAnswerClient([
+        {"answers": [], "links": []},
+        {"answers": [preamble], "links": []},
+    ])
+    output = await client.probe("session", "doubao", "比较服务商", timeout=0.01)
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert not output.answer
+
+
+def test_doubao_short_actual_conclusion_is_not_research_progress():
+    assert not browser_skill.is_incomplete_preamble(
+        "doubao", "初步结论：应先建立基线，核对回答准确性与引用信源，再比较优化前后变化。"
+    )
+
+
+@pytest.mark.parametrize("streaming,finished", [(True, False), (False, False), (False, True), (True, True)])
+@pytest.mark.asyncio
+async def test_doubao_native_streaming_attribute_controls_completion(streaming, finished):
+    if not shutil.which("node"):
+        pytest.skip("Node.js not installed")
+
+    class StreamingDomClient(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            harness = r'''
+const streaming = process.argv[2];
+const node = {innerText:'正在输出尚未结束的答案',
+ getAttribute:k=>k==='data-streaming'?streaming:null,
+ querySelectorAll:()=>[]};
+const turn = {querySelector:()=>process.argv[3]==='true'?{}:null};
+global.document = {body:{innerText:node.innerText},querySelectorAll:s=>
+ s==='[data-testid="message_text_content"]'?[node]:
+ s==='[data-testid=receive_message]'?[turn]:[]};
+global.location = {hostname:'www.doubao.com'};
+process.stdout.write(JSON.stringify(eval(process.argv[1])));
+'''
+            result = subprocess.run(
+                ["node", "-e", harness, args[1], str(streaming).lower(), str(finished).lower()],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 0, result.stderr
+            return {"value": json.loads(result.stdout)}
+
+    page = await StreamingDomClient("browser")._answer_page(
+        "session", PLATFORMS["doubao"]["answer_selector"]
+    )
+    assert page["generating"] is (streaming or not finished)
 
 
 @pytest.mark.asyncio
@@ -2833,3 +3295,256 @@ async def test_gemini_keeps_earlier_inline_links_when_a_later_dialog_fails():
     }
     assert status == SourceCaptureStatus.FAILED
     assert diagnostic == "source dialog changed"
+
+
+def test_perplexity_connector_composer_is_recognized():
+    ref = BskCliClient._find_textbox_ref(
+        '@e67 textbox "Type @ for connectors" [empty]',
+        PLATFORMS['perplexity']['textbox'],
+    )
+    assert ref == '@e67'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["perplexity", "gemini"])
+async def test_stream_is_read_after_strict_evaluation_changes(platform):
+    class LiveReadClient(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            if args[0] == 'evaluate':
+                raise RuntimeError('permission_denied: The strict observation changed before this action')
+            selector = args[args.index('--selector') + 1] if '--selector' in args else ''
+            if args[0] == 'extract':
+                return {'rows': [{'url': 'https://example.com/spec', 'title': 'Specs'}], 'coverage': 'complete'}
+            if selector == PLATFORMS[platform]['answer_selector']:
+                return {'items': [{'ref': '@e10', 'values': {'text': 'A complete laser answer'}}], 'truncated': False}
+            if selector == 'button':
+                return {'items': [{'values': {'label': 'Stop generating', 'text': '', 'disabled': None}}], 'truncated': False}
+            return {'items': [{'values': {'text': 'A complete laser answer'}}], 'truncated': False}
+    client = LiveReadClient('test-browser')
+    page = await client._answer_page('session', PLATFORMS[platform]['answer_selector'])
+    assert page['answers'] == ['A complete laser answer']
+    assert page['generating'] is True
+    assert page['answer_entries'][0]['links'] == [{'url': 'https://example.com/spec', 'title': 'Specs'}]
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_answer_poll_keeps_existing_strict_observation_retry(monkeypatch):
+    class Client(BskCliClient):
+        async def _cooperate_context(self, *args):
+            return 'context', 'observation'
+    class Process:
+        def __init__(self, rc, output):
+            self.returncode, self.output = rc, output
+        async def communicate(self):
+            return self.output, b''
+    replies = iter([
+        Process(1, b'{"code":"permission_denied","message":"The strict observation changed before this action"}'),
+        Process(0, b'{"value":{"answers":["complete answer"],"links":[]}}'),
+    ])
+    async def spawn(*args, **kwargs):
+        return next(replies)
+    async def no_wait(*args):
+        return None
+    monkeypatch.setattr(browser_skill.asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr(browser_skill.asyncio, 'sleep', no_wait)
+    page = await Client('test-browser')._answer_page('session', PLATFORMS['chatgpt']['answer_selector'])
+    assert page['answers'] == ['complete answer']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('effect_state', ['not_applied', 'unknown'])
+async def test_settling_input_retries_only_when_effect_is_known_not_applied(monkeypatch, effect_state):
+    class Client(BskCliClient):
+        async def _cooperate_context(self, *args):
+            return 'context', 'observation'
+    class Process:
+        def __init__(self, rc, output):
+            self.returncode, self.output = rc, output
+        async def communicate(self):
+            return self.output, b''
+    error = json.dumps({'code': 'cdp_failed', 'message': 'Previous operation is still settling; this action was not dispatched', 'data': {'dispatched': False, 'effect_state': effect_state}}).encode()
+    replies = iter([Process(1, error), Process(0, b'{"ok":true}')])
+    calls = []
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        return next(replies)
+    async def no_wait(*args):
+        return None
+    monkeypatch.setattr(browser_skill.asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr(browser_skill.asyncio, 'sleep', no_wait)
+    if effect_state == 'unknown':
+        with pytest.raises(browser_skill.BrowserControlInterrupted):
+            await Client('test-browser')._run_json('click', '@e1', '--session', 'session')
+        assert len(calls) == 1
+    else:
+        assert await Client('test-browser')._run_json('click', '@e1', '--session', 'session') == {'ok': True}
+        assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_source_failure_preserves_the_answer():
+    class Client(BskCliClient):
+        async def _run_json(self, *args, timeout=30):
+            if args[0] == 'extract':
+                raise RuntimeError('source list could not be read')
+            return {'items': [{'ref': '@e10', 'values': {'text': 'complete answer'}}], 'truncated': False}
+    page = await Client('test-browser')._read_stream_page('session', PLATFORMS['gemini']['answer_selector'])
+    assert page['answers'] == ['complete answer']
+    assert 'source list could not be read' in page['source_read_diagnostic']
+
+
+@pytest.mark.asyncio
+async def test_stream_source_read_error_is_reported_separately_from_answer():
+    client = DelayedAnswerClient([
+        {'answers': [], 'links': []},
+        *[{'answers': ['complete answer'], 'links': [], 'source_read_diagnostic': 'source list could not be read'}] * 3,
+    ])
+    output = await client.probe('session', 'perplexity', 'question', timeout=1)
+    assert output.answer == 'complete answer'
+    assert output.failure is None
+    assert output.source_capture_status == SourceCaptureStatus.FAILED
+    assert 'source list could not be read' in output.source_capture_diagnostic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cleanup_failure_index', [1, 2])
+async def test_chatgpt_sources_remain_complete_when_only_final_popup_cleanup_fails(cleanup_failure_index):
+    class Client(BskCliClient):
+        def __init__(self):
+            super().__init__('test-browser', poll_interval=0)
+            self.opened = []
+        async def _run_json(self, *args, **kwargs):
+            if args[0] == 'evaluate' and 'return {links:' in args[1]:
+                return {'value': {'links': [], 'buttons': [{'title': 'First'}, {'title': 'Second'}, {'title': 'Third'}]}}
+            return {'value': True}
+        async def _chatgpt_source_target_ready(self, *args):
+            return True
+        async def _chatgpt_source_button_url(self, session_id, card_id):
+            index = int(card_id.split('-')[1])
+            self.opened.append(index)
+            return f'https://example.com/source-{index}', index != cleanup_failure_index
+    client = Client()
+    cards, complete, interrupted = await client._collect_chatgpt_source_group('session', '', 0, 3)
+    assert complete is (cleanup_failure_index == 2)
+    assert interrupted is True
+    assert len(cards) == cleanup_failure_index + 1
+    assert client.opened == list(range(cleanup_failure_index + 1))
+
+@pytest.mark.asyncio
+async def test_gemini_stalled_generation_keeps_evidence_for_retry(monkeypatch):
+    monkeypatch.setattr(browser_skill, "GEMINI_STREAM_STALL_SECONDS", 0, raising=False)
+    text = "Ethique St Clements is a shampoo bar for oily hair."
+    client = DelayedAnswerClient([
+        {"answers": [], "links": [], "page_text": ""},
+        {"answers": [text], "links": [], "page_text": text, "generating": True},
+    ])
+    output = await client.probe("session", "gemini", "Which shampoo?", timeout=.02)
+    assert output.failure == FailureKind.TIMEOUT
+    assert "stalled" in output.diagnostic
+    assert output.answer == text
+    assert output.source_evidence["failure_page"]["generating"] is True
+    assert output.retryable
+
+
+@pytest.mark.asyncio
+async def test_gemini_refusal_keeps_original_text_and_url():
+    text = "I'm having a hard time fulfilling your request. Can I help with something else?"
+    client = DelayedAnswerClient([
+        {"answers": [], "links": [], "page_text": ""},
+        {"answers": [text], "links": [], "page_text": text},
+    ])
+    output = await client.probe("session", "gemini", "Which machine?", timeout=.02)
+    assert output.failure == FailureKind.EXTRACTION_FAILED
+    assert output.answer == text
+    assert output.conversation_url
+    assert output.source_evidence["failure_page"]["answers"] == [text]
+
+
+@pytest.mark.asyncio
+async def test_failed_browser_attempt_saves_failure_evidence(tmp_path):
+    client = FakeBrowserClient(BrowserProbeOutput(
+        answer="incomplete body", failure=FailureKind.TIMEOUT, retryable=False,
+        diagnostic="generation stalled", source_evidence={"failure_page": {"generating": True}},
+    ))
+    result = await BrowserSkillAdapter(client=client, artifact_root=tmp_path).run(
+        "gemini", ProbeRequest(prompt="question"))
+    assert result.status == JobStatus.FAILED
+    assert result.raw_answer == "incomplete body"
+    assert json.loads(Path(result.artifact_paths[0]).read_text())["failure_page"]["generating"]
+
+@pytest.mark.asyncio
+async def test_gemini_expired_budget_keeps_last_failure(tmp_path):
+    class SlowFailure(FakeBrowserClient):
+        async def probe(self, *args, **kwargs):
+            await browser_skill.asyncio.sleep(.02)
+            return BrowserProbeOutput(answer="partial body", failure=FailureKind.TIMEOUT,
+                                      diagnostic="generation stalled", source_evidence={"failure_page": {}})
+    client = SlowFailure()
+    result = await BrowserSkillAdapter(client=client, artifact_root=tmp_path).run(
+        "gemini", ProbeRequest(prompt="question", options={"timeout": .01}))
+    assert result.raw_answer == "partial body"
+    assert result.diagnostic == "generation stalled"
+    assert len(client.started) == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_retry_success_retains_failed_attempt_evidence(tmp_path):
+    client = FakeBrowserClient(outputs=[
+        BrowserProbeOutput(answer="partial", failure=FailureKind.TIMEOUT,
+                           source_evidence={"failure_page": {"generating": True}}),
+        BrowserProbeOutput(answer="complete answer"),
+    ])
+    result = await BrowserSkillAdapter(client=client, artifact_root=tmp_path).run(
+        "gemini", ProbeRequest(prompt="question"))
+    assert result.status == JobStatus.SUCCEEDED
+    assert len(client.started) == 2
+    evidence = json.loads(Path(result.artifact_paths[0]).read_text())
+    assert evidence["attempt_diagnostics"][0]["answer"] == "partial"
+
+@pytest.mark.asyncio
+async def test_selector_read_retries_document_changed_without_replaying_writes(monkeypatch):
+    class Process:
+        def __init__(self, code, value): self.returncode, self.value = code, value
+        async def communicate(self): return self.value, b''
+    replies = iter([
+        Process(1, b'{"code":"not_found","message":"The read document or target changed; inspect it again"}'),
+        Process(0, b'{"items":[],"truncated":false}'),
+    ])
+    calls=[]
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        return next(replies)
+    async def no_wait(*args): pass
+    monkeypatch.setattr(browser_skill.asyncio, 'create_subprocess_exec', spawn)
+    monkeypatch.setattr(browser_skill.asyncio, 'sleep', no_wait)
+    assert await BskCliClient('browser')._run_json('read', '--selector', 'main', '--session', 's') == {
+        'items': [], 'truncated': False}
+    assert len(calls) == 2
+    assert all(c[1] == 'read' for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_mode_policy_failure_is_not_retried(tmp_path):
+    from look4geo_probe.sampling_modes import SamplingModeError
+    client = FakeBrowserClient(error=SamplingModeError('Sampling mode blocked: work/Computer active'))
+    attempt = await BrowserSkillAdapter(client=client, artifact_root=tmp_path).run(
+        'gemini', ProbeRequest(prompt='question'))
+    assert attempt.failure == FailureKind.SEND_FAILED
+    assert attempt.diagnostic.startswith('Sampling mode blocked:')
+    assert len(client.started) == 1
+    assert len(client.stopped) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('result', [
+    {'truncated': True, 'items': []}, {},
+    {'items': [{'redacted': ['text'], 'values': {'text': ''}}]},
+    {'items': []},
+])
+async def test_perplexity_mode_guard_fails_closed_when_search_not_confirmed(result):
+    from look4geo_probe.sampling_modes import SamplingModeError
+    class Client(BskCliClient):
+        async def _run_json(self, *args, **kwargs):
+            return result
+    with pytest.raises(SamplingModeError):
+        await Client('browser')._assert_non_work_mode('s', 'perplexity', stage='before_submit')

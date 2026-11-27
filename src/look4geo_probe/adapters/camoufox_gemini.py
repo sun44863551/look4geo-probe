@@ -27,6 +27,7 @@ from ..models import (
 )
 from ..sources import citations_from_sources, merge_sources, normalize_source_url
 from ..validity import answer_is_valid_measurement
+from ..sampling_modes import ACTIVE_MODE_SELECTOR, SamplingModeError, is_forbidden_mode_label
 
 GEMINI_URL = "https://gemini.google.com/app"
 COMPOSER_SELECTOR = (
@@ -345,8 +346,16 @@ class GeminiPageDriver:
                 return False
             await asyncio.sleep(self.poll_interval)
 
+    async def _assert_non_work_mode(self) -> None:
+        controls = self.page.locator(ACTIVE_MODE_SELECTOR)
+        for control in await controls.all():
+            label = await control.get_attribute("aria-label") or await control.inner_text()
+            if is_forbidden_mode_label(label):
+                raise SamplingModeError("Sampling mode blocked: work/Computer active; no prompt may be sent")
+
     async def _send(self, prompt: str) -> bool:
         for _ in range(3):
+            await self._assert_non_work_mode()
             composer = self.page.locator(COMPOSER_SELECTOR).last
             current = (await self._composer_text(composer)).strip()
             if current != prompt and not await self._fill_prompt(prompt):
@@ -357,6 +366,7 @@ class GeminiPageDriver:
             try:
                 await self.page.locator(SEND_SELECTOR).last.click(timeout=3000)
             except Exception:
+                await self._assert_non_work_mode()
                 try:
                     await composer.press("Enter")
                 except Exception:
@@ -429,6 +439,7 @@ class GeminiPageDriver:
                     artifact_dir, "flash-mode"
                 ),
             )
+        await self._assert_non_work_mode()
         if not await self._fill_prompt(prompt):
             return GeminiBrowserResult(
                 status=JobStatus.FAILED,
@@ -484,6 +495,10 @@ class GeminiPageDriver:
                     failure=FailureKind.EXTRACTION_FAILED,
                     diagnostic="Gemini returned a transient platform error 3 times",
                 )
+        except SamplingModeError as error:
+            return GeminiBrowserResult(
+                status=JobStatus.FAILED, failure=FailureKind.SEND_FAILED, diagnostic=str(error),
+            )
         except TimeoutError:
             artifacts = await self._capture_diagnostics(artifact_dir, "timeout")
             return GeminiBrowserResult(

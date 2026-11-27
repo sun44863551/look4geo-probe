@@ -1,0 +1,37 @@
+{
+  "customer_id": "validation-demo",
+  "batch_id": "platform-per-instance-20261127",
+  "schedule": "platform-per-instance",
+  "browsers": [
+    "7cf212dd",
+    "9ac92006",
+    "e5341f23"
+  ],
+  "platforms": [
+    "perplexity",
+    "gemini",
+    "chatgpt"
+  ],
+  "questions": [
+    {
+      "id": "Q1",
+      "prompt": "What is the difference between robots.txt and sitemap.xml for website crawling?"
+    },
+    {
+      "id": "Q2",
+      "prompt": "When should I use a 301 redirect instead of a canonical tag for duplicate URLs?"
+    },
+    {
+      "id": "Q3",
+      "prompt": "What is the difference between blocking crawling in robots.txt and using a noindex directive?"
+    }
+  ],
+  "buyer_baseline": "english",
+  "gemini_mode": "auto",
+  "timeout": 420,
+  "assignments": {
+    "7cf212dd": "chatgpt",
+    "9ac92006": "gemini",
+    "e5341f23": "perplexity"
+  }
+}

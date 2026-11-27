@@ -2,7 +2,11 @@
 set -eu
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-LOCAL_ENV="$PROJECT_DIR/config/local.env"
+LOCAL_ENV=${LOOK4GEO_LOCAL_ENV:-"$PROJECT_DIR/config/local.env"}
+if [ -n "${LOOK4GEO_LOCAL_ENV-}" ] && [ ! -r "$LOCAL_ENV" ]; then
+    printf '%s\n' "Probe configuration is not readable: $LOCAL_ENV" >&2
+    exit 2
+fi
 REQUESTED_BROWSER_ID=${LOOK4GEO_BROWSER_ID-}
 
 if [ -f "$LOCAL_ENV" ]; then
